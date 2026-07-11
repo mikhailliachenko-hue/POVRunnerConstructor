@@ -1,21 +1,14 @@
 extends Node3D
 
 const LANE_X: Array[float] = [-3.2, 0.0, 3.2]
-const COURSE_LENGTH := 180.0
 const DODGE_DURATION := 1.8
 const DUCK_DURATION := 1.25
 const DUCK_DEPTH := 1.05
 const ACTION_WINDOW := 12.0
-const EVENTS: Array[Dictionary] = [
-	{"distance": 32.0, "action": "JUMP"},
-	{"distance": 56.0, "action": "RIGHT"},
-	{"distance": 80.0, "action": "LEFT"},
-	{"distance": 108.0, "action": "DUCK"},
-	{"distance": 134.0, "action": "RIGHT"},
-	{"distance": 158.0, "action": "LEFT"},
-]
-
 var speed := 12.0
+var course_length := 180.0
+var video_duration := 15.0
+var events: Array[Dictionary] = []
 var jump_height := 2.2
 var lane_smoothness := 9.0
 var lane := 1
@@ -31,6 +24,7 @@ var duck_offset := 0.0
 var finished := false
 var camera_rig: Node3D
 var camera: Camera3D
+var course_root: Node3D
 var progress_bar: ProgressBar
 var distance_label: Label
 var action_label: Label
@@ -43,12 +37,22 @@ var event_index := 0
 var action_armed := false
 var feedback_time := 0.0
 var countdown := 3.0
+var smash_sequence_active := false
+var smash_sequence_timer := 0.0
+var smash_sequence_stage := 0
+var active_smash_event: Dictionary = {}
+var builder_active := true
+var builder_overlay: ColorRect
+var duration_spin: SpinBox
+var round_checks: Dictionary = {}
 
 func _ready() -> void:
 	build_world()
-	build_course()
 	build_ui()
-	restart()
+	build_builder_ui()
+	apply_builder_settings()
+	builder_overlay.visible = true
+	builder_active = true
 
 func build_world() -> void:
 	var environment := WorldEnvironment.new()
@@ -75,27 +79,36 @@ func build_world() -> void:
 	camera.fov = 78.0
 	camera.current = true
 	camera_rig.add_child(camera)
+	course_root = Node3D.new()
+	course_root.name = "GeneratedCourse"
+	add_child(course_root)
 
 func build_course() -> void:
-	create_box("Road", Vector3(11, 0.25, COURSE_LENGTH + 20), Vector3(0, -0.25, -COURSE_LENGTH * 0.5 + 5), Color("f54fa2"))
+	for child in course_root.get_children():
+		child.queue_free()
+	create_box("Road", Vector3(11, 0.25, course_length + 20), Vector3(0, -0.25, -course_length * 0.5 + 5), Color("f54fa2"))
 	for lane_mark in [-1.6, 1.6]:
-		create_box("LaneMark", Vector3(0.10, 0.025, COURSE_LENGTH), Vector3(lane_mark, 0.02, -COURSE_LENGTH * 0.5 + 5), Color(1, 1, 1, 0.65))
+		create_box("LaneMark", Vector3(0.10, 0.025, course_length), Vector3(lane_mark, 0.02, -course_length * 0.5 + 5), Color(1, 1, 1, 0.65))
 
-	for z in range(0, 19):
-		var world_z := -float(z * 10)
+	for z in range(0, int(course_length / 30.0) + 1):
+		var world_z := -float(z * 30)
 		create_tree(Vector3(-7.2, 0, world_z), z)
 		create_tree(Vector3(7.2, 0, world_z), z + 1)
 
-	create_obstacle(1, -28.0, Color("49d765"), "JUMP", 1.5)
-	create_dodge_gate(-52.0, "RIGHT", Color("3a84ed"))
-	create_dodge_gate(-76.0, "LEFT", Color("ffca38"))
-	create_duck_gate(-104.0, Color("9858e8"))
-	create_dodge_gate(-130.0, "RIGHT", Color("35d4cf"))
-	create_dodge_gate(-154.0, "LEFT", Color("f06b42"))
+	var colors := [Color("49d765"), Color("3a84ed"), Color("ffca38"), Color("9858e8")]
+	for index in range(events.size()):
+		var event := events[index]
+		var z_position := start_position.z - float(event.distance)
+		match str(event.action):
+			"JUMP": create_obstacle(1, z_position, colors[index % colors.size()], "JUMP", 1.5)
+			"DUCK": create_duck_gate(z_position, colors[index % colors.size()])
+			"LEFT", "RIGHT": create_dodge_gate(z_position, str(event.action), colors[index % colors.size()])
+			"SMASH": event["targets"] = create_smash_gate(z_position, colors[index % colors.size()])
 
-	create_box("FinishTop", Vector3(11, 0.55, 0.55), Vector3(0, 5.7, -COURSE_LENGTH), Color.WHITE)
-	create_box("FinishLeft", Vector3(0.55, 6, 0.55), Vector3(-5.2, 2.8, -COURSE_LENGTH), Color.WHITE)
-	create_box("FinishRight", Vector3(0.55, 6, 0.55), Vector3(5.2, 2.8, -COURSE_LENGTH), Color.WHITE)
+	var finish_z := start_position.z - course_length
+	create_box("FinishTop", Vector3(11, 0.55, 0.55), Vector3(0, 5.7, finish_z), Color.WHITE)
+	create_box("FinishLeft", Vector3(0.55, 6, 0.55), Vector3(-5.2, 2.8, finish_z), Color.WHITE)
+	create_box("FinishRight", Vector3(0.55, 6, 0.55), Vector3(5.2, 2.8, finish_z), Color.WHITE)
 
 func create_tree(pos: Vector3, index: int) -> void:
 	create_cylinder(Vector3(pos.x, 1.25, pos.z), 0.24, 2.5, Color("f1eee2"))
@@ -116,6 +129,25 @@ func create_duck_gate(z: float, color: Color) -> void:
 	create_box("DuckGateLeft", Vector3(0.65, 4.7, 1.8), Vector3(-5.0, 2.1, z), color)
 	create_box("DuckGateRight", Vector3(0.65, 4.7, 1.8), Vector3(5.0, 2.1, z), color)
 
+func create_smash_gate(z: float, color: Color) -> Array[MeshInstance3D]:
+	# One unified wall mesh. Later its two materials will receive the
+	# user-selected intact and cracked image textures.
+	var targets: Array[MeshInstance3D] = []
+	var wall := create_box("SmashWall", Vector3(10.5, 4.6, 0.55), Vector3(0, 2.15, z), color)
+	var intact_material := make_material(color)
+	if ResourceLoader.exists("res://assets/smash_wall/intact.png"):
+		intact_material.albedo_texture = load("res://assets/smash_wall/intact.png")
+	wall.material_override = intact_material
+	var cracked_material := make_material(color.darkened(0.38))
+	if ResourceLoader.exists("res://assets/smash_wall/cracked.png"):
+		cracked_material.albedo_texture = load("res://assets/smash_wall/cracked.png")
+	cracked_material.emission_enabled = true
+	cracked_material.emission = Color("ff6a4d")
+	cracked_material.emission_energy_multiplier = 0.35
+	wall.set_meta("cracked_material", cracked_material)
+	targets.append(wall)
+	return targets
+
 func create_obstacle(obstacle_lane: int, z: float, color: Color, action: String, height: float) -> void:
 	var body := StaticBody3D.new()
 	body.name = "Obstacle_%s" % action
@@ -132,9 +164,9 @@ func create_obstacle(obstacle_lane: int, z: float, color: Color, action: String,
 	box.size = mesh.size
 	shape.shape = box
 	body.add_child(shape)
-	add_child(body)
+	course_root.add_child(body)
 
-func create_box(node_name: String, size: Vector3, pos: Vector3, color: Color) -> void:
+func create_box(node_name: String, size: Vector3, pos: Vector3, color: Color) -> MeshInstance3D:
 	var mesh_instance := MeshInstance3D.new()
 	mesh_instance.name = node_name
 	mesh_instance.position = pos
@@ -142,7 +174,8 @@ func create_box(node_name: String, size: Vector3, pos: Vector3, color: Color) ->
 	mesh.size = size
 	mesh_instance.mesh = mesh
 	mesh_instance.material_override = make_material(color)
-	add_child(mesh_instance)
+	course_root.add_child(mesh_instance)
+	return mesh_instance
 
 func create_cylinder(pos: Vector3, radius: float, height: float, color: Color) -> void:
 	var item := MeshInstance3D.new()
@@ -153,7 +186,7 @@ func create_cylinder(pos: Vector3, radius: float, height: float, color: Color) -
 	mesh.height = height
 	item.mesh = mesh
 	item.material_override = make_material(color)
-	add_child(item)
+	course_root.add_child(item)
 
 func create_sphere(pos: Vector3, radius: float, color: Color) -> void:
 	var item := MeshInstance3D.new()
@@ -163,7 +196,7 @@ func create_sphere(pos: Vector3, radius: float, color: Color) -> void:
 	mesh.height = radius * 2.0
 	item.mesh = mesh
 	item.material_override = make_material(color)
-	add_child(item)
+	course_root.add_child(item)
 
 func make_material(color: Color) -> StandardMaterial3D:
 	var material := StandardMaterial3D.new()
@@ -178,7 +211,7 @@ func build_ui() -> void:
 	progress_bar = ProgressBar.new()
 	progress_bar.position = Vector2(190, 24)
 	progress_bar.size = Vector2(900, 34)
-	progress_bar.max_value = COURSE_LENGTH
+	progress_bar.max_value = course_length
 	progress_bar.show_percentage = false
 	layer.add_child(progress_bar)
 
@@ -267,7 +300,112 @@ func add_setting(parent: VBoxContainer, label_text: String, minimum: float, maxi
 	slider.value_changed.connect(callback)
 	parent.add_child(slider)
 
+func build_builder_ui() -> void:
+	var layer := CanvasLayer.new()
+	layer.layer = 20
+	add_child(layer)
+	builder_overlay = ColorRect.new()
+	builder_overlay.color = Color(0.035, 0.055, 0.10, 0.97)
+	builder_overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	layer.add_child(builder_overlay)
+
+	var panel := PanelContainer.new()
+	panel.position = Vector2(275, 55)
+	panel.size = Vector2(730, 610)
+	builder_overlay.add_child(panel)
+	var content := VBoxContainer.new()
+	content.add_theme_constant_override("separation", 13)
+	panel.add_child(content)
+
+	var heading := Label.new()
+	heading.text = "POV RUNNER BUILDER"
+	heading.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	heading.add_theme_font_size_override("font_size", 34)
+	heading.add_theme_color_override("font_color", Color("fff052"))
+	content.add_child(heading)
+	var subtitle := Label.new()
+	subtitle.text = "Build one custom round — then record it and create the next one"
+	subtitle.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	subtitle.add_theme_font_size_override("font_size", 18)
+	content.add_child(subtitle)
+
+	var duration_row := HBoxContainer.new()
+	duration_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	content.add_child(duration_row)
+	var duration_label := Label.new()
+	duration_label.text = "VIDEO DURATION (SECONDS)   "
+	duration_label.add_theme_font_size_override("font_size", 20)
+	duration_row.add_child(duration_label)
+	duration_spin = SpinBox.new()
+	duration_spin.min_value = 12
+	duration_spin.max_value = 180
+	duration_spin.step = 1
+	duration_spin.value = 60
+	duration_spin.custom_minimum_size = Vector2(130, 42)
+	duration_row.add_child(duration_spin)
+
+	create_round_selector(content, "MOVEMENTS IN THIS ROUND", round_checks, ["JUMP"])
+
+	var note := Label.new()
+	note.text = "The builder automatically spaces obstacles and keeps the route passable."
+	note.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	note.add_theme_color_override("font_color", Color("a8b7d8"))
+	content.add_child(note)
+	var play_button := Button.new()
+	play_button.text = "BUILD & PLAY"
+	play_button.custom_minimum_size = Vector2(0, 58)
+	play_button.add_theme_font_size_override("font_size", 24)
+	play_button.pressed.connect(apply_builder_settings)
+	content.add_child(play_button)
+
+func create_round_selector(parent: VBoxContainer, title_text: String, target: Dictionary, defaults: Array[String]) -> void:
+	var title := Label.new()
+	title.text = title_text
+	title.add_theme_font_size_override("font_size", 21)
+	parent.add_child(title)
+	var row := HBoxContainer.new()
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	row.add_theme_constant_override("separation", 22)
+	parent.add_child(row)
+	for action in ["JUMP", "LEFT", "RIGHT", "DUCK", "SMASH"]:
+		var check := CheckButton.new()
+		check.text = action
+		check.button_pressed = action in defaults
+		check.add_theme_font_size_override("font_size", 18)
+		row.add_child(check)
+		target[action] = check
+
+func selected_actions(checks: Dictionary) -> Array[String]:
+	var selected: Array[String] = []
+	for action in ["JUMP", "LEFT", "RIGHT", "DUCK", "SMASH"]:
+		var check: CheckButton = checks[action]
+		if check.button_pressed:
+			selected.append(action)
+	if selected.is_empty():
+		selected.append("JUMP")
+	return selected
+
+func apply_builder_settings() -> void:
+	video_duration = duration_spin.value
+	course_length = video_duration * speed
+	events.clear()
+	var chosen_actions := selected_actions(round_checks)
+	var event_time := 4.0
+	var action_index := 0
+	while event_time < video_duration - 2.0:
+		var action := chosen_actions[action_index % chosen_actions.size()]
+		action_index += 1
+		events.append({"distance": event_time * speed, "action": action})
+		event_time += 4.0
+	progress_bar.max_value = course_length
+	build_course()
+	restart()
+	builder_active = false
+	builder_overlay.visible = false
+
 func _process(delta: float) -> void:
+	if builder_active:
+		return
 	if Input.is_action_just_pressed("move_left") and not finished and countdown <= 0.0 and dodge_direction == 0:
 		dodge_direction = -1
 		dodge_time = 0.0
@@ -291,7 +429,9 @@ func _process(delta: float) -> void:
 	if Input.is_key_pressed(KEY_R):
 		restart()
 
-	if countdown > 0.0:
+	if smash_sequence_active:
+		update_smash_sequence(delta)
+	elif countdown > 0.0:
 		countdown -= delta
 		action_label.text = str(maxi(1, ceili(countdown)))
 		if countdown <= 0.0:
@@ -299,8 +439,8 @@ func _process(delta: float) -> void:
 	elif not finished:
 		distance += speed * delta
 		evaluate_event()
-		if distance >= COURSE_LENGTH:
-			distance = COURSE_LENGTH
+		if distance >= course_length:
+			distance = course_length
 			finished = true
 			action_label.text = "FINISH!"
 			action_icon.visible = false
@@ -337,7 +477,7 @@ func _process(delta: float) -> void:
 	camera_rig.position.y = start_position.y + vertical_offset - duck_offset + sin(distance * 1.3) * 0.035
 	camera_rig.position.z = start_position.z - distance
 	progress_bar.value = distance
-	distance_label.text = "%d / %d M" % [int(distance), int(COURSE_LENGTH)]
+	distance_label.text = "%d / %d M" % [int(distance), int(course_length)]
 	if not finished and countdown <= 0.0:
 		update_action_hint()
 	update_feedback(delta)
@@ -345,8 +485,8 @@ func _process(delta: float) -> void:
 func update_action_hint() -> void:
 	action_label.text = ""
 	action_icon.visible = false
-	if event_index < EVENTS.size():
-		var event := EVENTS[event_index]
+	if event_index < events.size():
+		var event := events[event_index]
 		var gap: float = float(event.distance) - distance
 		if gap > 0.0 and gap < 18.0:
 			action_label.text = str(event.action)
@@ -360,25 +500,76 @@ func set_action_icon(action: String) -> void:
 		"DUCK":
 			action_icon.texture = load("res://assets/action_icons/duck.png")
 			action_icon.visible = true
+		"SMASH":
+			action_icon.texture = load("res://assets/action_icons/smash.png")
+			action_icon.visible = true
 		_:
 			action_icon.visible = false
 
 func arm_action(action: String) -> void:
-	if event_index >= EVENTS.size():
+	if event_index >= events.size():
 		return
-	var event := EVENTS[event_index]
+	var event := events[event_index]
 	var gap: float = float(event.distance) - distance
 	if gap >= 0.0 and gap <= ACTION_WINDOW and str(event.action) == action:
 		action_armed = true
 
 func evaluate_event() -> void:
-	if event_index >= EVENTS.size():
+	if event_index >= events.size():
 		return
-	var event := EVENTS[event_index]
-	if distance >= float(event.distance):
-		show_result(action_armed)
+	var event := events[event_index]
+	if str(event.action) == "SMASH" and distance >= float(event.distance) - 3.0:
+		begin_smash_sequence(event)
+	elif distance >= float(event.distance):
+		if str(event.action) != "SMASH":
+			show_result(action_armed)
+			event_index += 1
+			action_armed = false
+
+func begin_smash_sequence(event: Dictionary) -> void:
+	smash_sequence_active = true
+	smash_sequence_timer = 0.0
+	smash_sequence_stage = 0
+	active_smash_event = event
+	action_label.text = "SMASH 2X"
+	set_action_icon("SMASH")
+	action_label.pivot_offset = action_label.size * 0.5
+	action_icon.pivot_offset = action_icon.size * 0.5
+
+func update_smash_sequence(delta: float) -> void:
+	smash_sequence_timer += delta
+	var pulse := 1.0 + sin(smash_sequence_timer * TAU * 2.2) * 0.085
+	action_label.scale = Vector2.ONE * pulse
+	action_icon.scale = Vector2.ONE * pulse
+	if smash_sequence_stage == 0 and smash_sequence_timer >= 0.55:
+		smash_sequence_stage = 1
+		apply_cracked_smash_texture(active_smash_event)
+		play_sfx("SMASH")
+	elif smash_sequence_stage == 1 and smash_sequence_timer >= 1.35:
+		smash_sequence_stage = 2
+		break_smash_targets(active_smash_event)
+		play_sfx("SMASH")
+		show_result(true)
 		event_index += 1
 		action_armed = false
+		smash_sequence_active = false
+		active_smash_event = {}
+		action_label.scale = Vector2.ONE
+		action_icon.scale = Vector2.ONE
+
+func apply_cracked_smash_texture(event: Dictionary) -> void:
+	if not event.has("targets"):
+		return
+	for target in event.targets:
+		if is_instance_valid(target) and target.has_meta("cracked_material"):
+			target.material_override = target.get_meta("cracked_material")
+
+func break_smash_targets(event: Dictionary) -> void:
+	if not event.has("targets"):
+		return
+	for target in event.targets:
+		if is_instance_valid(target):
+			target.queue_free()
 
 func show_result(success: bool) -> void:
 	# Пропуск не наказывается: для фитнес-ролика оставляем только
@@ -437,6 +628,11 @@ func synthesize_sfx(kind: String) -> AudioStreamWAV:
 			start_frequency = 520.0
 			end_frequency = 920.0
 			noise_amount = 0.01
+		"SMASH":
+			duration = 0.34
+			start_frequency = 185.0
+			end_frequency = 48.0
+			noise_amount = 0.38
 
 	var sample_count := int(sample_rate * duration)
 	var pcm := PackedByteArray()
@@ -488,6 +684,14 @@ func restart() -> void:
 	action_armed = false
 	feedback_time = 0.0
 	countdown = 3.0
+	smash_sequence_active = false
+	smash_sequence_timer = 0.0
+	smash_sequence_stage = 0
+	active_smash_event = {}
+	if action_label:
+		action_label.scale = Vector2.ONE
+	if action_icon:
+		action_icon.scale = Vector2.ONE
 	camera_rig.position = start_position
 	if action_label:
 		action_label.text = "3"
