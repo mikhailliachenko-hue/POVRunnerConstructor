@@ -25,6 +25,7 @@ var finished := false
 var camera_rig: Node3D
 var camera: Camera3D
 var course_root: Node3D
+var world_environment: Environment
 var progress_bar: ProgressBar
 var distance_label: Label
 var action_label: Label
@@ -45,6 +46,8 @@ var builder_active := true
 var builder_overlay: ColorRect
 var duration_spin: SpinBox
 var round_checks: Dictionary = {}
+var theme_option: OptionButton
+var active_theme := "Candy"
 
 func _ready() -> void:
 	build_world()
@@ -56,14 +59,14 @@ func _ready() -> void:
 
 func build_world() -> void:
 	var environment := WorldEnvironment.new()
-	var env := Environment.new()
-	env.background_mode = Environment.BG_COLOR
-	env.background_color = Color("55baf2")
-	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	env.ambient_light_color = Color.WHITE
-	env.ambient_light_energy = 0.75
-	env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
-	environment.environment = env
+	world_environment = Environment.new()
+	world_environment.background_mode = Environment.BG_COLOR
+	world_environment.background_color = Color("55baf2")
+	world_environment.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+	world_environment.ambient_light_color = Color.WHITE
+	world_environment.ambient_light_energy = 0.75
+	world_environment.tonemap_mode = Environment.TONE_MAPPER_FILMIC
+	environment.environment = world_environment
 	add_child(environment)
 
 	var sun := DirectionalLight3D.new()
@@ -86,14 +89,12 @@ func build_world() -> void:
 func build_course() -> void:
 	for child in course_root.get_children():
 		child.queue_free()
-	create_box("Road", Vector3(11, 0.25, course_length + 20), Vector3(0, -0.25, -course_length * 0.5 + 5), Color("f54fa2"))
+	var road_color := theme_color("road")
+	create_box("Road", Vector3(11, 0.25, course_length + 20), Vector3(0, -0.25, -course_length * 0.5 + 5), road_color)
 	for lane_mark in [-1.6, 1.6]:
 		create_box("LaneMark", Vector3(0.10, 0.025, course_length), Vector3(lane_mark, 0.02, -course_length * 0.5 + 5), Color(1, 1, 1, 0.65))
 
-	for z in range(0, int(course_length / 30.0) + 1):
-		var world_z := -float(z * 30)
-		create_tree(Vector3(-7.2, 0, world_z), z)
-		create_tree(Vector3(7.2, 0, world_z), z + 1)
+	build_theme_environment()
 
 	var colors := [Color("49d765"), Color("3a84ed"), Color("ffca38"), Color("9858e8")]
 	for index in range(events.size()):
@@ -114,6 +115,60 @@ func create_tree(pos: Vector3, index: int) -> void:
 	create_cylinder(Vector3(pos.x, 1.25, pos.z), 0.24, 2.5, Color("f1eee2"))
 	var colors := [Color("ef426f"), Color("37cf79"), Color("56aef0"), Color("9639bd")]
 	create_sphere(Vector3(pos.x, 3.4, pos.z), 1.45, colors[index % colors.size()])
+
+func theme_color(slot: String) -> Color:
+	var themes := {
+		"Candy": {"road": Color("f54fa2"), "ground": Color("ff8ed1"), "accent": Color("fff052")},
+		"Block World": {"road": Color("626c78"), "ground": Color("63b64b"), "accent": Color("45d06f")},
+		"Metro": {"road": Color("555c69"), "ground": Color("2c3441"), "accent": Color("3f94e8")},
+	}
+	return themes[active_theme][slot]
+
+func build_theme_environment() -> void:
+	match active_theme:
+		"Candy": build_candy_environment()
+		"Block World": build_block_environment()
+		"Metro": build_metro_environment()
+
+func build_candy_environment() -> void:
+	create_box("CandyGround", Vector3(42, 0.2, course_length + 20), Vector3(0, -0.38, -course_length * 0.5 + 5), theme_color("ground"))
+	create_box("LeftRail", Vector3(0.3, 0.45, course_length), Vector3(-5.8, 0.65, -course_length * 0.5 + 5), Color("fff4d2"))
+	create_box("RightRail", Vector3(0.3, 0.45, course_length), Vector3(5.8, 0.65, -course_length * 0.5 + 5), Color("fff4d2"))
+	for index in range(0, int(course_length / 10.0) + 1):
+		var z := -float(index * 10)
+		create_tree(Vector3(-7.6, 0, z), index)
+		create_tree(Vector3(7.6, 0, z - 5), index + 1)
+		if index % 3 == 0:
+			create_cylinder(Vector3(-10.5, 1.4, z - 5), 0.22, 2.8, Color.WHITE)
+			create_sphere(Vector3(-10.5, 3.25, z - 5), 0.85, theme_color("accent"))
+		if index % 4 == 1:
+			create_sphere(Vector3(11.5, 2.1, z - 3), 1.8, Color("ff6d84"))
+			create_sphere(Vector3(-12.5, 1.6, z - 7), 1.35, Color("75e8ff"))
+		if index % 5 == 2:
+			create_box("CandyMonument", Vector3(2.6, 5.5, 2.6), Vector3(12.8, 2.55, z), Color("8e55d7"))
+
+func build_block_environment() -> void:
+	create_box("GrassGround", Vector3(46, 0.35, course_length + 20), Vector3(0, -0.42, -course_length * 0.5 + 5), theme_color("ground"))
+	for index in range(0, int(course_length / 22.0) + 1):
+		var z := -float(index * 22)
+		var height := 4.0 + float(index % 4) * 1.5
+		create_box("BlockBuildingL", Vector3(7, height, 9), Vector3(-10.0, height * 0.5, z), Color("d79055").lightened(float(index % 3) * 0.08))
+		create_box("BlockBuildingR", Vector3(7, height + 1, 9), Vector3(10.0, (height + 1) * 0.5, z - 10), Color("5e82bd").lightened(float(index % 2) * 0.1))
+		create_box("BlockTrunk", Vector3(0.65, 2.5, 0.65), Vector3(-6.6, 1.25, z - 9), Color("8f613d"))
+		create_box("BlockLeaves", Vector3(2.8, 2.4, 2.8), Vector3(-6.6, 3.4, z - 9), Color("3f9b52"))
+
+func build_metro_environment() -> void:
+	create_box("MetroGround", Vector3(34, 0.3, course_length + 20), Vector3(0, -0.4, -course_length * 0.5 + 5), theme_color("ground"))
+	create_box("LeftWall", Vector3(1.0, 6.5, course_length), Vector3(-9.5, 3.0, -course_length * 0.5 + 5), Color("7b5039"))
+	create_box("RightWall", Vector3(1.0, 6.5, course_length), Vector3(9.5, 3.0, -course_length * 0.5 + 5), Color("345466"))
+	create_box("Ceiling", Vector3(20, 0.5, course_length), Vector3(0, 6.35, -course_length * 0.5 + 5), Color("242a34"))
+	for index in range(0, int(course_length / 12.0) + 1):
+		var z := -float(index * 12)
+		create_box("ColumnL", Vector3(0.55, 6.0, 0.8), Vector3(-7.0, 2.8, z), Color("d08355"))
+		create_box("ColumnR", Vector3(0.55, 6.0, 0.8), Vector3(7.0, 2.8, z), Color("d08355"))
+		create_box("RoofBeam", Vector3(14.5, 0.35, 0.65), Vector3(0, 5.75, z), theme_color("accent"))
+	for rail_x in [-3.2, 0.0, 3.2]:
+		create_box("Rail", Vector3(0.12, 0.09, course_length), Vector3(rail_x, 0.04, -course_length * 0.5 + 5), Color("c5ced8"))
 
 func create_dodge_gate(z: float, action: String, color: Color) -> void:
 	# Игрок начинает каждый манёвр из центра. Две полосы перекрыты,
@@ -344,6 +399,20 @@ func build_builder_ui() -> void:
 	duration_spin.custom_minimum_size = Vector2(130, 42)
 	duration_row.add_child(duration_spin)
 
+	var theme_row := HBoxContainer.new()
+	theme_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	content.add_child(theme_row)
+	var theme_label := Label.new()
+	theme_label.text = "ENVIRONMENT THEME   "
+	theme_label.add_theme_font_size_override("font_size", 20)
+	theme_row.add_child(theme_label)
+	theme_option = OptionButton.new()
+	theme_option.add_item("Candy")
+	theme_option.add_item("Block World")
+	theme_option.add_item("Metro")
+	theme_option.custom_minimum_size = Vector2(210, 42)
+	theme_row.add_child(theme_option)
+
 	create_round_selector(content, "MOVEMENTS IN THIS ROUND", round_checks, ["JUMP"])
 
 	var note := Label.new()
@@ -387,6 +456,8 @@ func selected_actions(checks: Dictionary) -> Array[String]:
 
 func apply_builder_settings() -> void:
 	video_duration = duration_spin.value
+	active_theme = theme_option.get_item_text(theme_option.selected)
+	apply_theme_environment()
 	course_length = video_duration * speed
 	events.clear()
 	var chosen_actions := selected_actions(round_checks)
@@ -402,6 +473,18 @@ func apply_builder_settings() -> void:
 	restart()
 	builder_active = false
 	builder_overlay.visible = false
+
+func apply_theme_environment() -> void:
+	match active_theme:
+		"Candy":
+			world_environment.background_color = Color("55baf2")
+			world_environment.ambient_light_color = Color("fff5f7")
+		"Block World":
+			world_environment.background_color = Color("75b9ee")
+			world_environment.ambient_light_color = Color("e8f3ff")
+		"Metro":
+			world_environment.background_color = Color("18202b")
+			world_environment.ambient_light_color = Color("9db4d1")
 
 func _process(delta: float) -> void:
 	if builder_active:
