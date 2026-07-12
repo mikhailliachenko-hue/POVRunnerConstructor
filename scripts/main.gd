@@ -63,6 +63,8 @@ var custom_model_categories: Array[String] = []
 var custom_model_paths: Array[String] = []
 var custom_library_root: Node3D
 var occupied_environment_spots: Array[Dictionary] = []
+var surface_textures: Dictionary = {}
+const SURFACE_TILE_SIZE := 1.0
 
 func _ready() -> void:
 	build_world()
@@ -88,6 +90,8 @@ func build_world() -> void:
 	world_environment.adjustment_saturation = 1.14
 	environment.environment = world_environment
 	add_child(environment)
+	load_background_panorama()
+	load_surface_textures()
 
 	sun_light = DirectionalLight3D.new()
 	sun_light.rotation_degrees = Vector3(-55, -25, 0)
@@ -109,6 +113,43 @@ func build_world() -> void:
 	custom_library_root.name = "CustomModelLibrary"
 	custom_library_root.visible = false
 	add_child(custom_library_root)
+
+func load_background_panorama() -> void:
+	var folder_path := "res://assets/textures/background"
+	var image_files: Array[String] = []
+	for file_name in DirAccess.get_files_at(folder_path):
+		if file_name.get_extension().to_lower() in ["png", "jpg", "jpeg", "webp", "hdr", "exr"]:
+			image_files.append(file_name)
+	image_files.sort()
+	if image_files.is_empty():
+		world_environment.background_mode = Environment.BG_COLOR
+		world_environment.sky = null
+		return
+	var texture := load(folder_path.path_join(image_files[0])) as Texture2D
+	if not texture:
+		push_warning("Could not load background panorama: %s" % image_files[0])
+		return
+	var panorama_material := PanoramaSkyMaterial.new()
+	panorama_material.panorama = texture
+	var panorama_sky := Sky.new()
+	panorama_sky.sky_material = panorama_material
+	world_environment.sky = panorama_sky
+	world_environment.background_mode = Environment.BG_SKY
+
+func load_surface_textures() -> void:
+	surface_textures.clear()
+	for slot in ["road", "ground"]:
+		var folder_path := "res://assets/textures/%s" % slot
+		var image_files: Array[String] = []
+		for file_name in DirAccess.get_files_at(folder_path):
+			if file_name.get_extension().to_lower() in ["png", "jpg", "jpeg", "webp"]:
+				image_files.append(file_name)
+		image_files.sort()
+		if image_files.is_empty():
+			continue
+		var texture := load(folder_path.path_join(image_files[0])) as Texture2D
+		if texture:
+			surface_textures[slot] = texture
 
 func build_course() -> void:
 	for child in course_root.get_children():
@@ -166,8 +207,9 @@ func build_open_world_layers() -> void:
 	var accent := theme_color("accent")
 	var structure := theme_color("road").darkened(0.22)
 	if not has_models_in_category("BUILDINGS"):
-		for index in range(0, int(course_length / 34.0) + 1):
-			var z := -float(index * 34) - 10.0
+		var building_spacing := lerpf(48.0, 18.0, map_fullness())
+		for index in range(0, int(course_length / building_spacing) + 1):
+			var z := -float(index) * building_spacing - 10.0
 			var left_height := 1.8 + float(index % 3) * 0.8
 			var right_height := 2.2 + float((index + 1) % 3) * 0.7
 			create_box("MidTerraceL", Vector3(8.5, left_height, 13.0), Vector3(-17.0, left_height * 0.5 - 0.05, z), structure.lightened(0.05 * float(index % 2)))
@@ -186,14 +228,19 @@ func build_category_placeholders() -> void:
 	# Only a missing layer receives simple placeholders. Loading a model in one
 	# category replaces that layer without deleting the other parts of the scene.
 	if not has_models_in_category("DECOR"):
-		for index in range(0, int(course_length / 16.0) + 1):
-			var z := -float(index * 16) - 8.0
-			var side := -1.0 if index % 2 == 0 else 1.0
-			create_cylinder(Vector3(side * 7.5, 1.35, z), 0.18, 2.7, Color("72533b"))
-			create_sphere(Vector3(side * 7.5, 3.25, z), 1.15, theme_color("accent"))
+		var placeholder_spacing := lerpf(14.0, 4.0, map_fullness())
+		for index in range(0, int(course_length / placeholder_spacing) + 1):
+			var z := -float(index) * placeholder_spacing - 8.0
+			for side in [-1.0, 1.0]:
+				# At lower settings alternate the sides; fuller maps populate both.
+				if map_fullness() < 0.55 and (index + int((side + 1.0) * 0.5)) % 2 != 0:
+					continue
+				create_cylinder(Vector3(side * 7.5, 1.35, z), 0.18, 2.7, Color("72533b"))
+				create_sphere(Vector3(side * 7.5, 3.25, z), 1.15, theme_color("accent"))
 	if not has_models_in_category("CHARACTERS"):
-		for index in range(1, int(course_length / 42.0) + 1):
-			var z := -float(index * 42) - 5.0
+		var character_spacing := lerpf(48.0, 16.0, map_fullness())
+		for index in range(1, int(course_length / character_spacing) + 1):
+			var z := -float(index) * character_spacing - 5.0
 			var side := -1.0 if index % 2 == 0 else 1.0
 			create_box("CharacterPlaceholder", Vector3(0.8, 1.8, 0.65), Vector3(side * 9.0, 0.9, z), Color("fff4d0"))
 			create_sphere(Vector3(side * 9.0, 2.15, z), 0.42, Color("ffcf9d"))
@@ -288,6 +335,9 @@ func spawn_custom_environment_objects() -> void:
 	for category in ["BUILDINGS", "DECOR", "CHARACTERS", "LANDMARK"]:
 		spawn_category(category, density)
 
+func map_fullness() -> float:
+	return clampf((density_spin.value if density_spin else 90.0) / 100.0, 0.0, 1.0)
+
 func spawn_fence_lines() -> void:
 	var indices := category_model_indices("FENCES")
 	if indices.is_empty():
@@ -323,8 +373,9 @@ func spawn_category(category: String, density: float) -> void:
 	if category == "LANDMARK":
 		spawn_model_instance(indices.pick_random(), Vector3(0, 0, -course_length - 24.0), 14.0, 0.0)
 		return
-	var base_spacing: float = {"BUILDINGS": 42.0, "DECOR": 14.0, "CHARACTERS": 30.0}[category]
-	var spacing := base_spacing * lerpf(1.45, 0.62, density / 100.0)
+	var base_spacing: float = {"BUILDINGS": 42.0, "DECOR": 8.0, "CHARACTERS": 30.0}[category]
+	var fullness := clampf(density / 100.0, 0.0, 1.0)
+	var spacing := base_spacing * lerpf(1.5, 0.35, fullness)
 	var z := -10.0 - randf_range(0.0, spacing)
 	while absf(z) < course_length:
 		var x_range := Vector2(8.0, 12.0)
@@ -336,24 +387,27 @@ func spawn_category(category: String, density: float) -> void:
 				target_height = 9.0 if active_layout == "Open World" else 4.8
 				clearance = 8.0 if active_layout == "Open World" else 4.0
 			"DECOR":
-				x_range = Vector2(7.0, 14.0) if active_layout == "Open World" else Vector2(7.5, 9.0)
+				x_range = Vector2(7.0, 10.0) if active_layout == "Open World" else Vector2(7.2, 8.7)
 				target_height = 4.0
-				clearance = 2.8
+				clearance = 1.8
 			"CHARACTERS":
 				x_range = Vector2(7.0, 11.0) if active_layout == "Open World" else Vector2(7.2, 8.8)
 				target_height = 2.4
 				clearance = 2.0
-		var candidate := Vector3.ZERO
-		var found_spot := false
-		for attempt in range(12):
-			var side := -1.0 if randf() < 0.5 else 1.0
-			candidate = Vector3(side * randf_range(x_range.x, x_range.y), 0, z + randf_range(-3.0, 3.0))
-			if is_environment_spot_free(candidate, clearance):
-				found_spot = true
-				break
-		if found_spot:
-			occupied_environment_spots.append({"position": candidate, "radius": clearance})
-			spawn_model_instance(indices.pick_random(), candidate, target_height, randf_range(-0.35, 0.35))
+		var side_count := 2 if fullness >= 0.6 else 1
+		var first_side := -1.0 if randf() < 0.5 else 1.0
+		for side_index in range(side_count):
+			var side := first_side if side_index == 0 else -first_side
+			var candidate := Vector3.ZERO
+			var found_spot := false
+			for attempt in range(12):
+				candidate = Vector3(side * randf_range(x_range.x, x_range.y), 0, z + randf_range(-spacing * 0.3, spacing * 0.3))
+				if is_environment_spot_free(candidate, clearance):
+					found_spot = true
+					break
+			if found_spot:
+				occupied_environment_spots.append({"position": candidate, "radius": clearance})
+				spawn_model_instance(indices.pick_random(), candidate, target_height, randf_range(-0.35, 0.35))
 		z -= spacing * randf_range(0.72, 1.3)
 
 func is_environment_spot_free(candidate: Vector3, radius: float) -> bool:
@@ -384,6 +438,36 @@ func spawn_model_instance(model_index: int, position: Vector3, target_height: fl
 	# the instance until their actual lowest point touches the ground.
 	var visible_bottom := calculate_world_mesh_bottom(instance)
 	instance.global_position.y -= visible_bottom
+	# Keep scenery fully behind the fence. Imported models can have off-centre
+	# pivots or wide foundations which otherwise poke through into the road.
+	if custom_model_categories[model_index] != "FENCES" and absf(position.x) > 5.5:
+		move_instance_behind_fence(instance, signf(position.x))
+
+func move_instance_behind_fence(instance: Node3D, side: float) -> void:
+	var bounds := calculate_world_mesh_bounds(instance)
+	if bounds.size == Vector3.ZERO:
+		return
+	const SAFE_FENCE_X := 6.35
+	if side > 0.0:
+		var inward_edge := bounds.position.x
+		if inward_edge < SAFE_FENCE_X:
+			instance.global_position.x += SAFE_FENCE_X - inward_edge
+	else:
+		var inward_edge := bounds.end.x
+		if inward_edge > -SAFE_FENCE_X:
+			instance.global_position.x -= inward_edge + SAFE_FENCE_X
+
+func calculate_world_mesh_bounds(root: Node3D) -> AABB:
+	var combined := AABB(Vector3.ZERO, Vector3.ZERO)
+	var has_bounds := false
+	for child in root.find_children("*", "MeshInstance3D", true, false):
+		var mesh_instance := child as MeshInstance3D
+		if not mesh_instance or not mesh_instance.mesh or not mesh_instance.is_visible_in_tree():
+			continue
+		var world_bounds: AABB = mesh_instance.global_transform * mesh_instance.get_aabb()
+		combined = combined.merge(world_bounds) if has_bounds else world_bounds
+		has_bounds = true
+	return combined if has_bounds else AABB(Vector3.ZERO, Vector3.ZERO)
 
 func calculate_world_mesh_bottom(root: Node3D) -> float:
 	var bottom := INF
@@ -552,15 +636,23 @@ func create_obstacle(obstacle_lane: int, z: float, color: Color, action: String,
 	body.name = "Obstacle_%s" % action
 	body.position = Vector3(LANE_X[obstacle_lane], height * 0.5, z)
 	body.set_meta("action", action)
+	var obstacle_size := Vector3(1.35, 1.35, 1.35) if action == "JUMP" else Vector3(2.55, height, 1.6)
+	if action == "JUMP":
+		body.position.y = 0.675
 	var mesh_instance := MeshInstance3D.new()
+	mesh_instance.name = "%s_Visual" % action
 	var mesh := BoxMesh.new()
-	mesh.size = Vector3(2.55, height, 1.6)
+	mesh.size = obstacle_size
 	mesh_instance.mesh = mesh
-	mesh_instance.material_override = make_material(color)
+	var obstacle_material := make_material(color)
+	obstacle_material.emission_enabled = true
+	obstacle_material.emission = color
+	obstacle_material.emission_energy_multiplier = 0.32
+	mesh_instance.material_override = obstacle_material
 	body.add_child(mesh_instance)
 	var shape := CollisionShape3D.new()
 	var box := BoxShape3D.new()
-	box.size = mesh.size
+	box.size = obstacle_size
 	shape.shape = box
 	body.add_child(shape)
 	course_root.add_child(body)
@@ -571,7 +663,20 @@ func create_box(node_name: String, size: Vector3, pos: Vector3, color: Color) ->
 	var mesh := BoxMesh.new()
 	mesh.size = size
 	mesh_instance.mesh = mesh
-	mesh_instance.material_override = make_material(color)
+	var material := make_material(color)
+	var texture_slot := ""
+	if node_name == "Road":
+		texture_slot = "road"
+	elif node_name.ends_with("Ground"):
+		texture_slot = "ground"
+	if texture_slot in surface_textures:
+		material.albedo_color = Color.WHITE
+		material.albedo_texture = surface_textures[texture_slot]
+		material.texture_repeat = 1
+		# StandardMaterial3D uses UV X/Y. On the horizontal box face, X is the
+		# surface width and Y is its length; the third component is not a UV axis.
+		material.uv1_scale = Vector3(maxf(size.x / SURFACE_TILE_SIZE, 1.0), maxf(size.z / SURFACE_TILE_SIZE, 1.0), 1.0)
+	mesh_instance.material_override = material
 	course_root.add_child(mesh_instance)
 	return mesh_instance
 
@@ -611,6 +716,18 @@ func build_ui() -> void:
 	progress_bar.size = Vector2(900, 34)
 	progress_bar.max_value = course_length
 	progress_bar.show_percentage = false
+	var progress_background := StyleBoxFlat.new()
+	progress_background.bg_color = Color("18213f")
+	progress_background.border_color = Color("55e8ff")
+	progress_background.set_border_width_all(3)
+	progress_background.set_corner_radius_all(12)
+	progress_bar.add_theme_stylebox_override("background", progress_background)
+	var progress_fill := StyleBoxFlat.new()
+	progress_fill.bg_color = Color("ff2fa8")
+	progress_fill.border_color = Color("fff052")
+	progress_fill.set_border_width_all(3)
+	progress_fill.set_corner_radius_all(12)
+	progress_bar.add_theme_stylebox_override("fill", progress_fill)
 	layer.add_child(progress_bar)
 
 	distance_label = Label.new()
@@ -773,14 +890,14 @@ func build_builder_ui() -> void:
 	density_row.alignment = BoxContainer.ALIGNMENT_CENTER
 	content.add_child(density_row)
 	var density_label := Label.new()
-	density_label.text = "ENVIRONMENT DENSITY   "
+	density_label.text = "MAP FULLNESS   "
 	density_label.add_theme_font_size_override("font_size", 20)
 	density_row.add_child(density_label)
 	density_spin = SpinBox.new()
 	density_spin.min_value = 0
 	density_spin.max_value = 100
 	density_spin.step = 5
-	density_spin.value = 75
+	density_spin.value = 100
 	density_spin.suffix = "%"
 	density_spin.custom_minimum_size = Vector2(130, 42)
 	density_row.add_child(density_spin)
@@ -1010,6 +1127,12 @@ func set_action_icon(action: String) -> void:
 			action_icon.visible = true
 		"DUCK":
 			action_icon.texture = load("res://assets/action_icons/duck.png")
+			action_icon.visible = true
+		"LEFT":
+			action_icon.texture = load("res://assets/action_icons/left.png")
+			action_icon.visible = true
+		"RIGHT":
+			action_icon.texture = load("res://assets/action_icons/right.png")
 			action_icon.visible = true
 		"SMASH":
 			action_icon.texture = load("res://assets/action_icons/smash.png")
