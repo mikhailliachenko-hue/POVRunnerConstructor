@@ -65,6 +65,7 @@ var custom_library_root: Node3D
 var occupied_environment_spots: Array[Dictionary] = []
 var surface_textures: Dictionary = {}
 var obstacle_model_prototypes: Dictionary = {}
+var obstacle_model_next_indices: Dictionary = {}
 const SURFACE_TILE_SIZE := 1.0
 
 func _ready() -> void:
@@ -156,6 +157,7 @@ func load_surface_textures() -> void:
 func build_course() -> void:
 	for child in course_root.get_children():
 		child.queue_free()
+	obstacle_model_next_indices.clear()
 	var road_color := theme_color("road")
 	create_box("Road", Vector3(11, 0.25, course_length + 20), Vector3(0, -0.25, -course_length * 0.5 + 5), road_color)
 	for lane_mark in [-1.6, 1.6]:
@@ -509,27 +511,34 @@ func load_obstacle_models() -> void:
 			if file_name.get_extension().to_lower() in ["glb", "gltf"]:
 				model_files.append(file_name)
 		model_files.sort()
-		if model_files.is_empty():
-			continue
-		var document := GLTFDocument.new()
-		var state := GLTFState.new()
-		var resource_path := folder_path.path_join(model_files[0])
-		var error := document.append_from_file(ProjectSettings.globalize_path(resource_path), state)
-		if error != OK:
-			push_warning("Could not load %s obstacle model: %s" % [action, error_string(error)])
-			continue
-		var generated := document.generate_scene(state)
-		if generated is Node3D:
-			var prototype := generated as Node3D
-			prototype.name = "%sObstaclePrototype" % action.capitalize()
-			prototype.visible = false
-			custom_library_root.add_child(prototype)
-			obstacle_model_prototypes[action] = prototype
+		var prototypes: Array[Node3D] = []
+		for file_name in model_files:
+			var document := GLTFDocument.new()
+			var state := GLTFState.new()
+			var resource_path := folder_path.path_join(file_name)
+			var error := document.append_from_file(ProjectSettings.globalize_path(resource_path), state)
+			if error != OK:
+				push_warning("Could not load %s obstacle model %s: %s" % [action, file_name, error_string(error)])
+				continue
+			var generated := document.generate_scene(state)
+			if generated is Node3D:
+				var prototype := generated as Node3D
+				prototype.name = "%sObstaclePrototype_%d" % [action.capitalize(), prototypes.size()]
+				prototype.visible = false
+				custom_library_root.add_child(prototype)
+				prototypes.append(prototype)
+		if not prototypes.is_empty():
+			obstacle_model_prototypes[action] = prototypes
 
 func create_obstacle_visual(action: String, position: Vector3, target_size: Vector3) -> Node3D:
 	if not obstacle_model_prototypes.has(action):
 		return null
-	var prototype: Node3D = obstacle_model_prototypes[action]
+	var prototypes: Array = obstacle_model_prototypes[action]
+	if prototypes.is_empty():
+		return null
+	var next_index := int(obstacle_model_next_indices.get(action, 0)) % prototypes.size()
+	obstacle_model_next_indices[action] = next_index + 1
+	var prototype := prototypes[next_index] as Node3D
 	var instance := prototype.duplicate() as Node3D
 	instance.name = "%s_CustomVisual" % action
 	instance.visible = true
