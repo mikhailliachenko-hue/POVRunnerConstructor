@@ -5,6 +5,7 @@ const DODGE_DURATION := 1.8
 const DUCK_DURATION := 1.25
 const DUCK_DEPTH := 1.05
 const ACTION_WINDOW := 12.0
+const DUCK_VISUAL_SINK := 0.6
 var speed := 12.0
 var course_length := 180.0
 var video_duration := 15.0
@@ -565,6 +566,10 @@ func create_obstacle_visual(action: String, position: Vector3, target_size: Vect
 	instance.position = position
 	var world_bounds := calculate_world_mesh_bounds(instance)
 	instance.global_position += Vector3(position.x - world_bounds.get_center().x, -world_bounds.position.y, position.z - world_bounds.get_center().z)
+	if action == "DUCK":
+		# Sink the gate supports into the road so the overhead beam reads as a
+		# genuinely low clearance rather than a decorative arch.
+		instance.global_position.y -= DUCK_VISUAL_SINK
 	return instance
 
 func load_external_models(paths: PackedStringArray) -> void:
