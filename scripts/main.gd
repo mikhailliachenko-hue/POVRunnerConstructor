@@ -172,7 +172,11 @@ func build_course() -> void:
 		var event := events[index]
 		var z_position := start_position.z - float(event.distance)
 		match str(event.action):
-			"JUMP": create_obstacle(1, z_position, colors[index % colors.size()], "JUMP", 1.5)
+			"JUMP":
+				# Block all three lanes so the required action reads as a jump,
+				# rather than an obstacle the player could simply dodge around.
+				for obstacle_lane in range(3):
+					create_obstacle(obstacle_lane, z_position, colors[index % colors.size()], "JUMP", 1.5)
 			"DUCK": create_duck_gate(z_position, colors[index % colors.size()])
 			"LEFT", "RIGHT": create_dodge_gate(z_position, str(event.action), colors[index % colors.size()])
 			"SMASH": event["targets"] = create_smash_gate(z_position, colors[index % colors.size()])
@@ -551,10 +555,14 @@ func create_obstacle_visual(action: String, position: Vector3, target_size: Vect
 		return null
 	var user_scale := obstacle_scale_spin.value if obstacle_scale_spin else 1.0
 	if action == "JUMP":
-		# Compact props keep their original proportions.
-		var scale_factor := minf(target_size.x / maxf(bounds.size.x, 0.001), target_size.y / maxf(bounds.size.y, 0.001))
-		scale_factor = minf(scale_factor, target_size.z / maxf(bounds.size.z, 0.001))
-		instance.scale = Vector3.ONE * scale_factor * user_scale
+		# Keep height/depth proportional, but span almost the complete lane so
+		# the obstacle cannot be mistaken for a small prop to walk around.
+		var profile_scale := minf(target_size.y / maxf(bounds.size.y, 0.001), target_size.z / maxf(bounds.size.z, 0.001))
+		instance.scale = Vector3(
+			target_size.x / maxf(bounds.size.x, 0.001),
+			profile_scale,
+			profile_scale
+		) * user_scale
 	else:
 		# Gate-like obstacles must span their complete gameplay area even when
 		# the generated model has different source proportions.
@@ -716,7 +724,7 @@ func create_obstacle(obstacle_lane: int, z: float, color: Color, action: String,
 	body.name = "Obstacle_%s" % action
 	body.position = Vector3(LANE_X[obstacle_lane], height * 0.5, z)
 	body.set_meta("action", action)
-	var obstacle_size := Vector3(1.35, 1.35, 1.35) if action == "JUMP" else Vector3(2.55, height, 1.6)
+	var obstacle_size := Vector3(2.8, 1.35, 1.35) if action == "JUMP" else Vector3(2.55, height, 1.6)
 	if action == "JUMP":
 		body.position.y = 0.675
 	var custom_visual := create_obstacle_visual(action, Vector3(LANE_X[obstacle_lane], 0, z), obstacle_size)
