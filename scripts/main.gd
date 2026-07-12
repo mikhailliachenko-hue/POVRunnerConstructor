@@ -26,6 +26,7 @@ var camera_rig: Node3D
 var camera: Camera3D
 var course_root: Node3D
 var world_environment: Environment
+var sun_light: DirectionalLight3D
 var progress_bar: ProgressBar
 var distance_label: Label
 var action_label: Label
@@ -48,11 +49,26 @@ var duration_spin: SpinBox
 var round_checks: Dictionary = {}
 var theme_option: OptionButton
 var active_theme := "Candy"
+var layout_option: OptionButton
+var active_layout := "Open World"
+var density_spin: SpinBox
+var model_scale_spin: SpinBox
+var model_category_option: OptionButton
+var model_file_dialog: FileDialog
+var custom_model_list: ItemList
+var custom_model_prototypes: Array[Node3D] = []
+var custom_model_names: Array[String] = []
+var custom_model_scales: Array[float] = []
+var custom_model_categories: Array[String] = []
+var custom_model_paths: Array[String] = []
+var custom_library_root: Node3D
+var occupied_environment_spots: Array[Dictionary] = []
 
 func _ready() -> void:
 	build_world()
 	build_ui()
 	build_builder_ui()
+	load_models_from_category_folders()
 	apply_builder_settings()
 	builder_overlay.visible = true
 	builder_active = true
@@ -64,16 +80,20 @@ func build_world() -> void:
 	world_environment.background_color = Color("55baf2")
 	world_environment.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
 	world_environment.ambient_light_color = Color.WHITE
-	world_environment.ambient_light_energy = 0.75
+	world_environment.ambient_light_energy = 0.38
 	world_environment.tonemap_mode = Environment.TONE_MAPPER_FILMIC
+	world_environment.adjustment_enabled = true
+	world_environment.adjustment_brightness = 0.92
+	world_environment.adjustment_contrast = 1.08
+	world_environment.adjustment_saturation = 1.14
 	environment.environment = world_environment
 	add_child(environment)
 
-	var sun := DirectionalLight3D.new()
-	sun.rotation_degrees = Vector3(-55, -25, 0)
-	sun.light_energy = 1.15
-	sun.shadow_enabled = true
-	add_child(sun)
+	sun_light = DirectionalLight3D.new()
+	sun_light.rotation_degrees = Vector3(-55, -25, 0)
+	sun_light.light_energy = 0.72
+	sun_light.shadow_enabled = true
+	add_child(sun_light)
 
 	camera_rig = Node3D.new()
 	camera_rig.name = "CameraRig"
@@ -85,6 +105,10 @@ func build_world() -> void:
 	course_root = Node3D.new()
 	course_root.name = "GeneratedCourse"
 	add_child(course_root)
+	custom_library_root = Node3D.new()
+	custom_library_root.name = "CustomModelLibrary"
+	custom_library_root.visible = false
+	add_child(custom_library_root)
 
 func build_course() -> void:
 	for child in course_root.get_children():
@@ -125,15 +149,93 @@ func theme_color(slot: String) -> Color:
 	return themes[active_theme][slot]
 
 func build_theme_environment() -> void:
+	occupied_environment_spots.clear()
+	build_custom_base_environment()
+	build_category_placeholders()
+	spawn_custom_environment_objects()
+	if active_layout == "Closed Corridor":
+		build_closed_layout_shell()
+		build_closed_world_layers()
+	else:
+		build_open_world_layers()
+
+func build_open_world_layers() -> void:
+	# Three readable depth bands: near gameplay framing, mid-sized architecture,
+	# and a distant skyline/landmark. They remain structural when custom props
+	# are loaded, so imported models never float in an empty field.
+	var accent := theme_color("accent")
+	var structure := theme_color("road").darkened(0.22)
+	if not has_models_in_category("BUILDINGS"):
+		for index in range(0, int(course_length / 34.0) + 1):
+			var z := -float(index * 34) - 10.0
+			var left_height := 1.8 + float(index % 3) * 0.8
+			var right_height := 2.2 + float((index + 1) % 3) * 0.7
+			create_box("MidTerraceL", Vector3(8.5, left_height, 13.0), Vector3(-17.0, left_height * 0.5 - 0.05, z), structure.lightened(0.05 * float(index % 2)))
+			create_box("MidTerraceR", Vector3(8.5, right_height, 13.0), Vector3(17.0, right_height * 0.5 - 0.05, z - 16.0), structure.lightened(0.04 * float((index + 1) % 2)))
+			if index % 2 == 0:
+				create_box("MidTowerL", Vector3(3.2, 5.5 + float(index % 3), 3.2), Vector3(-20.0, 2.75, z - 7.0), accent.darkened(0.12))
+			else:
+				create_box("MidTowerR", Vector3(3.2, 6.2, 3.2), Vector3(20.0, 3.1, z - 7.0), accent.darkened(0.08))
+	if not has_models_in_category("LANDMARK"):
+		build_distant_landmark()
+
+func has_models_in_category(category: String) -> bool:
+	return category in custom_model_categories
+
+func build_category_placeholders() -> void:
+	# Only a missing layer receives simple placeholders. Loading a model in one
+	# category replaces that layer without deleting the other parts of the scene.
+	if not has_models_in_category("DECOR"):
+		for index in range(0, int(course_length / 16.0) + 1):
+			var z := -float(index * 16) - 8.0
+			var side := -1.0 if index % 2 == 0 else 1.0
+			create_cylinder(Vector3(side * 7.5, 1.35, z), 0.18, 2.7, Color("72533b"))
+			create_sphere(Vector3(side * 7.5, 3.25, z), 1.15, theme_color("accent"))
+	if not has_models_in_category("CHARACTERS"):
+		for index in range(1, int(course_length / 42.0) + 1):
+			var z := -float(index * 42) - 5.0
+			var side := -1.0 if index % 2 == 0 else 1.0
+			create_box("CharacterPlaceholder", Vector3(0.8, 1.8, 0.65), Vector3(side * 9.0, 0.9, z), Color("fff4d0"))
+			create_sphere(Vector3(side * 9.0, 2.15, z), 0.42, Color("ffcf9d"))
+
+func build_distant_landmark() -> void:
+	var landmark_z := -course_length - 24.0
+	var accent := theme_color("accent")
+	var body := theme_color("road").darkened(0.28)
+	create_box("LandmarkBody", Vector3(14.0, 8.0, 7.0), Vector3(0, 4.0, landmark_z), body)
+	create_box("LandmarkTowerL", Vector3(4.0, 13.0, 4.0), Vector3(-7.0, 6.5, landmark_z), accent.darkened(0.08))
+	create_box("LandmarkTowerR", Vector3(4.0, 13.0, 4.0), Vector3(7.0, 6.5, landmark_z), accent.darkened(0.08))
+	create_box("LandmarkCrown", Vector3(20.0, 1.0, 5.0), Vector3(0, 12.5, landmark_z), accent)
+
+func build_closed_world_layers() -> void:
+	# Repeating bays and lights give a tunnel rhythm without placing geometry
+	# in the playable three-lane corridor.
+	var accent := theme_color("accent")
+	var inset := theme_color("road").darkened(0.38)
+	for index in range(0, int(course_length / 12.0) + 1):
+		var z := -float(index * 12)
+		create_box("WallInsetL", Vector3(0.38, 3.4, 7.0), Vector3(-10.1, 2.7, z), inset)
+		create_box("WallInsetR", Vector3(0.38, 3.4, 7.0), Vector3(10.1, 2.7, z), inset.lightened(0.04))
+		create_box("CeilingLight", Vector3(4.8, 0.12, 1.0), Vector3(0, 6.38, z), accent.lightened(0.22))
+		if not has_models_in_category("BUILDINGS"):
+			if index % 3 == 1:
+				create_box("SideMachineL", Vector3(1.8, 2.8, 2.5), Vector3(-8.7, 1.4, z - 4.5), accent.darkened(0.2))
+			else:
+				create_box("SideMachineR", Vector3(1.8, 2.8, 2.5), Vector3(8.7, 1.4, z - 4.5), accent.darkened(0.16))
+
+func build_custom_base_environment() -> void:
+	# Keep only structural surfaces. Custom models replace all generated
+	# decorative trees, buildings, landmarks and side props.
 	match active_theme:
-		"Candy": build_candy_environment()
-		"Block World": build_block_environment()
-		"Metro": build_metro_environment()
+		"Candy":
+			create_box("CandyGround", Vector3(72, 0.2, course_length + 20), Vector3(0, -0.38, -course_length * 0.5 + 5), theme_color("ground"))
+		"Block World":
+			create_box("GrassGround", Vector3(72, 0.35, course_length + 20), Vector3(0, -0.42, -course_length * 0.5 + 5), theme_color("ground"))
+		"Metro":
+			create_box("MetroGround", Vector3(34, 0.3, course_length + 20), Vector3(0, -0.4, -course_length * 0.5 + 5), theme_color("ground"))
 
 func build_candy_environment() -> void:
-	create_box("CandyGround", Vector3(42, 0.2, course_length + 20), Vector3(0, -0.38, -course_length * 0.5 + 5), theme_color("ground"))
-	create_box("LeftRail", Vector3(0.3, 0.45, course_length), Vector3(-5.8, 0.65, -course_length * 0.5 + 5), Color("fff4d2"))
-	create_box("RightRail", Vector3(0.3, 0.45, course_length), Vector3(5.8, 0.65, -course_length * 0.5 + 5), Color("fff4d2"))
+	create_box("CandyGround", Vector3(72, 0.2, course_length + 20), Vector3(0, -0.38, -course_length * 0.5 + 5), theme_color("ground"))
 	for index in range(0, int(course_length / 10.0) + 1):
 		var z := -float(index * 10)
 		create_tree(Vector3(-7.6, 0, z), index)
@@ -148,7 +250,7 @@ func build_candy_environment() -> void:
 			create_box("CandyMonument", Vector3(2.6, 5.5, 2.6), Vector3(12.8, 2.55, z), Color("8e55d7"))
 
 func build_block_environment() -> void:
-	create_box("GrassGround", Vector3(46, 0.35, course_length + 20), Vector3(0, -0.42, -course_length * 0.5 + 5), theme_color("ground"))
+	create_box("GrassGround", Vector3(72, 0.35, course_length + 20), Vector3(0, -0.42, -course_length * 0.5 + 5), theme_color("ground"))
 	for index in range(0, int(course_length / 22.0) + 1):
 		var z := -float(index * 22)
 		var height := 4.0 + float(index % 4) * 1.5
@@ -159,9 +261,6 @@ func build_block_environment() -> void:
 
 func build_metro_environment() -> void:
 	create_box("MetroGround", Vector3(34, 0.3, course_length + 20), Vector3(0, -0.4, -course_length * 0.5 + 5), theme_color("ground"))
-	create_box("LeftWall", Vector3(1.0, 6.5, course_length), Vector3(-9.5, 3.0, -course_length * 0.5 + 5), Color("7b5039"))
-	create_box("RightWall", Vector3(1.0, 6.5, course_length), Vector3(9.5, 3.0, -course_length * 0.5 + 5), Color("345466"))
-	create_box("Ceiling", Vector3(20, 0.5, course_length), Vector3(0, 6.35, -course_length * 0.5 + 5), Color("242a34"))
 	for index in range(0, int(course_length / 12.0) + 1):
 		var z := -float(index * 12)
 		create_box("ColumnL", Vector3(0.55, 6.0, 0.8), Vector3(-7.0, 2.8, z), Color("d08355"))
@@ -169,6 +268,251 @@ func build_metro_environment() -> void:
 		create_box("RoofBeam", Vector3(14.5, 0.35, 0.65), Vector3(0, 5.75, z), theme_color("accent"))
 	for rail_x in [-3.2, 0.0, 3.2]:
 		create_box("Rail", Vector3(0.12, 0.09, course_length), Vector3(rail_x, 0.04, -course_length * 0.5 + 5), Color("c5ced8"))
+
+func build_closed_layout_shell() -> void:
+	var wall_left := theme_color("accent").darkened(0.35)
+	var wall_right := theme_color("accent").darkened(0.18)
+	var ceiling_color := theme_color("road").darkened(0.55)
+	create_box("LayoutLeftWall", Vector3(0.65, 7.0, course_length + 10), Vector3(-10.5, 3.15, -course_length * 0.5 + 5), wall_left)
+	create_box("LayoutRightWall", Vector3(0.65, 7.0, course_length + 10), Vector3(10.5, 3.15, -course_length * 0.5 + 5), wall_right)
+	create_box("LayoutCeiling", Vector3(21.5, 0.45, course_length + 10), Vector3(0, 6.65, -course_length * 0.5 + 5), ceiling_color)
+	for index in range(0, int(course_length / 18.0) + 1):
+		var z := -float(index * 18)
+		create_box("LayoutBeam", Vector3(21.0, 0.28, 0.55), Vector3(0, 6.25, z), theme_color("accent"))
+
+func spawn_custom_environment_objects() -> void:
+	if custom_model_prototypes.is_empty():
+		return
+	var density := density_spin.value if density_spin else 50.0
+	spawn_fence_lines()
+	for category in ["BUILDINGS", "DECOR", "CHARACTERS", "LANDMARK"]:
+		spawn_category(category, density)
+
+func spawn_fence_lines() -> void:
+	var indices := category_model_indices("FENCES")
+	if indices.is_empty():
+		return
+	var fence_x := 6.2
+	for side in [-1.0, 1.0]:
+		var z := 4.0
+		var section_number := 0
+		while z > -course_length - 4.0:
+			var model_index: int = indices[section_number % indices.size()]
+			var prototype := custom_model_prototypes[model_index]
+			var source_size: Vector3 = prototype.get_meta("source_size", Vector3.ONE)
+			var source_height := maxf(source_size.y, 0.001)
+			var fence_scale := 1.45 / source_height * custom_model_scales[model_index]
+			var rotate_to_track := source_size.x > source_size.z
+			var source_length := source_size.x if rotate_to_track else source_size.z
+			var section_length := maxf(source_length * fence_scale * 0.96, 0.5)
+			spawn_model_instance(model_index, Vector3(side * fence_x, 0, z), 1.45, PI * 0.5 if rotate_to_track else 0.0, false)
+			z -= section_length
+			section_number += 1
+
+func category_model_indices(category: String) -> Array[int]:
+	var result: Array[int] = []
+	for index in range(custom_model_categories.size()):
+		if custom_model_categories[index] == category:
+			result.append(index)
+	return result
+
+func spawn_category(category: String, density: float) -> void:
+	var indices := category_model_indices(category)
+	if indices.is_empty():
+		return
+	if category == "LANDMARK":
+		spawn_model_instance(indices.pick_random(), Vector3(0, 0, -course_length - 24.0), 14.0, 0.0)
+		return
+	var base_spacing: float = {"BUILDINGS": 42.0, "DECOR": 14.0, "CHARACTERS": 30.0}[category]
+	var spacing := base_spacing * lerpf(1.45, 0.62, density / 100.0)
+	var z := -10.0 - randf_range(0.0, spacing)
+	while absf(z) < course_length:
+		var x_range := Vector2(8.0, 12.0)
+		var target_height := 4.0
+		var clearance := 3.0
+		match category:
+			"BUILDINGS":
+				x_range = Vector2(14.0, 25.0) if active_layout == "Open World" else Vector2(8.0, 9.0)
+				target_height = 9.0 if active_layout == "Open World" else 4.8
+				clearance = 8.0 if active_layout == "Open World" else 4.0
+			"DECOR":
+				x_range = Vector2(7.0, 14.0) if active_layout == "Open World" else Vector2(7.5, 9.0)
+				target_height = 4.0
+				clearance = 2.8
+			"CHARACTERS":
+				x_range = Vector2(7.0, 11.0) if active_layout == "Open World" else Vector2(7.2, 8.8)
+				target_height = 2.4
+				clearance = 2.0
+		var candidate := Vector3.ZERO
+		var found_spot := false
+		for attempt in range(12):
+			var side := -1.0 if randf() < 0.5 else 1.0
+			candidate = Vector3(side * randf_range(x_range.x, x_range.y), 0, z + randf_range(-3.0, 3.0))
+			if is_environment_spot_free(candidate, clearance):
+				found_spot = true
+				break
+		if found_spot:
+			occupied_environment_spots.append({"position": candidate, "radius": clearance})
+			spawn_model_instance(indices.pick_random(), candidate, target_height, randf_range(-0.35, 0.35))
+		z -= spacing * randf_range(0.72, 1.3)
+
+func is_environment_spot_free(candidate: Vector3, radius: float) -> bool:
+	for spot in occupied_environment_spots:
+		var other: Vector3 = spot.position
+		var other_radius: float = spot.radius
+		var distance_2d := Vector2(candidate.x, candidate.z).distance_to(Vector2(other.x, other.z))
+		if distance_2d < radius + other_radius:
+			return false
+	return true
+
+func spawn_model_instance(model_index: int, position: Vector3, target_height: float, rotation_y: float, randomize_scale: bool = true) -> void:
+	var prototype := custom_model_prototypes[model_index]
+	var instance := prototype.duplicate() as Node3D
+	if not instance:
+		return
+	instance.visible = true
+	var source_height: float = prototype.get_meta("source_height", 1.0)
+	var scale_variation := randf_range(0.9, 1.12) if randomize_scale else 1.0
+	var final_scale := target_height / maxf(source_height, 0.001) * custom_model_scales[model_index] * scale_variation
+	instance.scale = Vector3.ONE * final_scale
+	instance.rotation.y = rotation_y
+	position.y = 0.0
+	instance.position = position
+	course_root.add_child(instance)
+	# Imported GLB roots often have an offset pivot or helper nodes below the
+	# visible object. Measure the final visible meshes in world space and move
+	# the instance until their actual lowest point touches the ground.
+	var visible_bottom := calculate_world_mesh_bottom(instance)
+	instance.global_position.y -= visible_bottom
+
+func calculate_world_mesh_bottom(root: Node3D) -> float:
+	var bottom := INF
+	for child in root.find_children("*", "MeshInstance3D", true, false):
+		var mesh_instance := child as MeshInstance3D
+		if not mesh_instance or not mesh_instance.mesh or not mesh_instance.is_visible_in_tree():
+			continue
+		var world_bounds: AABB = mesh_instance.global_transform * mesh_instance.get_aabb()
+		bottom = minf(bottom, world_bounds.position.y)
+	return 0.0 if is_inf(bottom) else bottom
+
+func open_model_file_dialog() -> void:
+	model_file_dialog.popup_centered_ratio(0.78)
+
+func load_models_from_category_folders() -> void:
+	var folders := {
+		"CHARACTERS": "res://модели/characters_animals",
+		"BUILDINGS": "res://модели/buildings",
+		"DECOR": "res://модели/decor",
+		"FENCES": "res://модели/fences",
+		"LANDMARK": "res://модели/landmark",
+	}
+	for category in folders:
+		var folder_path: String = folders[category]
+		for file_name in DirAccess.get_files_at(folder_path):
+			if file_name.get_extension().to_lower() not in ["glb", "gltf"]:
+				continue
+			var resource_path := folder_path.path_join(file_name)
+			load_external_model(ProjectSettings.globalize_path(resource_path), category)
+
+func load_external_models(paths: PackedStringArray) -> void:
+	if custom_model_prototypes.is_empty() and custom_model_list.item_count > 0:
+		custom_model_list.clear()
+	for path in paths:
+		load_external_model(path)
+
+func load_external_model(path: String, category_override: String = "") -> void:
+	var normalized_path := path.replace("\\", "/").to_lower()
+	if normalized_path in custom_model_paths:
+		return
+	var document := GLTFDocument.new()
+	var state := GLTFState.new()
+	var error := document.append_from_file(path, state)
+	if error != OK:
+		custom_model_list.add_item("ERROR: %s" % error_string(error))
+		return
+	var generated := document.generate_scene(state)
+	if not generated is Node3D:
+		custom_model_list.add_item("ERROR: model has no 3D root")
+		generated.queue_free()
+		return
+	var prototype := generated as Node3D
+	custom_library_root.add_child(prototype)
+	var bounds := calculate_model_bounds(prototype)
+	prototype.set_meta("source_height", maxf(bounds.size.y, 0.001))
+	prototype.set_meta("source_bottom", bounds.position.y)
+	prototype.set_meta("source_size", bounds.size)
+	prototype.visible = false
+	custom_model_prototypes.append(prototype)
+	var file_name := path.get_file()
+	custom_model_names.append(file_name)
+	custom_model_scales.append(model_scale_spin.value)
+	var category := category_override if not category_override.is_empty() else model_category_option.get_item_text(model_category_option.selected)
+	custom_model_categories.append(category)
+	custom_model_paths.append(normalized_path)
+	custom_model_list.add_item("[%s]  %s" % [category, file_name])
+	var new_index := custom_model_prototypes.size() - 1
+	custom_model_list.select(new_index)
+	model_scale_spin.value = custom_model_scales[new_index]
+
+func calculate_model_bounds(root: Node3D) -> AABB:
+	var combined := AABB(Vector3.ZERO, Vector3.ZERO)
+	var found_mesh := false
+	for child in root.find_children("*", "MeshInstance3D", true, false):
+		var mesh_instance := child as MeshInstance3D
+		if not mesh_instance or not mesh_instance.mesh:
+			continue
+		var relative_transform := root.global_transform.affine_inverse() * mesh_instance.global_transform
+		var mesh_bounds: AABB = relative_transform * mesh_instance.get_aabb()
+		if found_mesh:
+			combined = combined.merge(mesh_bounds)
+		else:
+			combined = mesh_bounds
+			found_mesh = true
+	if not found_mesh:
+		return AABB(Vector3.ZERO, Vector3.ONE)
+	return combined
+
+func remove_selected_custom_model() -> void:
+	var selected := custom_model_list.get_selected_items()
+	if selected.is_empty() or custom_model_prototypes.is_empty():
+		return
+	var index := selected[0]
+	if index < 0 or index >= custom_model_prototypes.size():
+		return
+	var prototype := custom_model_prototypes[index]
+	custom_model_prototypes.remove_at(index)
+	custom_model_names.remove_at(index)
+	custom_model_scales.remove_at(index)
+	custom_model_categories.remove_at(index)
+	custom_model_paths.remove_at(index)
+	custom_model_list.remove_item(index)
+	prototype.queue_free()
+	if custom_model_prototypes.is_empty():
+		custom_model_list.add_item("No custom 3D objects added")
+		model_scale_spin.value = 1.0
+	elif custom_model_list.item_count > 0:
+		var next_index := mini(index, custom_model_list.item_count - 1)
+		custom_model_list.select(next_index)
+		model_scale_spin.value = custom_model_scales[next_index]
+
+func select_custom_model(index: int) -> void:
+	if index >= 0 and index < custom_model_scales.size():
+		model_scale_spin.set_value_no_signal(custom_model_scales[index])
+
+func update_selected_model_scale(value: float) -> void:
+	var selected := custom_model_list.get_selected_items()
+	if selected.is_empty():
+		return
+	var index := selected[0]
+	if index >= 0 and index < custom_model_scales.size():
+		custom_model_scales[index] = value
+
+func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_ESCAPE:
+		if not builder_active:
+			builder_active = true
+			builder_overlay.visible = true
+			get_viewport().set_input_as_handled()
 
 func create_dodge_gate(z: float, action: String, color: Color) -> void:
 	# Игрок начинает каждый манёвр из центра. Две полосы перекрыты,
@@ -220,7 +564,6 @@ func create_obstacle(obstacle_lane: int, z: float, color: Color, action: String,
 	shape.shape = box
 	body.add_child(shape)
 	course_root.add_child(body)
-
 func create_box(node_name: String, size: Vector3, pos: Vector3, color: Color) -> MeshInstance3D:
 	var mesh_instance := MeshInstance3D.new()
 	mesh_instance.name = node_name
@@ -365,11 +708,11 @@ func build_builder_ui() -> void:
 	layer.add_child(builder_overlay)
 
 	var panel := PanelContainer.new()
-	panel.position = Vector2(275, 55)
-	panel.size = Vector2(730, 610)
+	panel.position = Vector2(245, 18)
+	panel.size = Vector2(790, 684)
 	builder_overlay.add_child(panel)
 	var content := VBoxContainer.new()
-	content.add_theme_constant_override("separation", 13)
+	content.add_theme_constant_override("separation", 8)
 	panel.add_child(content)
 
 	var heading := Label.new()
@@ -412,6 +755,84 @@ func build_builder_ui() -> void:
 	theme_option.add_item("Metro")
 	theme_option.custom_minimum_size = Vector2(210, 42)
 	theme_row.add_child(theme_option)
+
+	var layout_row := HBoxContainer.new()
+	layout_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	content.add_child(layout_row)
+	var layout_label := Label.new()
+	layout_label.text = "WORLD LAYOUT   "
+	layout_label.add_theme_font_size_override("font_size", 20)
+	layout_row.add_child(layout_label)
+	layout_option = OptionButton.new()
+	layout_option.add_item("Open World")
+	layout_option.add_item("Closed Corridor")
+	layout_option.custom_minimum_size = Vector2(210, 42)
+	layout_row.add_child(layout_option)
+
+	var density_row := HBoxContainer.new()
+	density_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	content.add_child(density_row)
+	var density_label := Label.new()
+	density_label.text = "ENVIRONMENT DENSITY   "
+	density_label.add_theme_font_size_override("font_size", 20)
+	density_row.add_child(density_label)
+	density_spin = SpinBox.new()
+	density_spin.min_value = 0
+	density_spin.max_value = 100
+	density_spin.step = 5
+	density_spin.value = 75
+	density_spin.suffix = "%"
+	density_spin.custom_minimum_size = Vector2(130, 42)
+	density_row.add_child(density_spin)
+
+	var model_row := HBoxContainer.new()
+	model_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	model_row.add_theme_constant_override("separation", 12)
+	content.add_child(model_row)
+	var category_label := Label.new()
+	category_label.text = "OBJECT TYPE"
+	model_row.add_child(category_label)
+	model_category_option = OptionButton.new()
+	model_category_option.add_item("CHARACTERS")
+	model_category_option.add_item("BUILDINGS")
+	model_category_option.add_item("DECOR")
+	model_category_option.add_item("FENCES")
+	model_category_option.add_item("LANDMARK")
+	model_category_option.custom_minimum_size = Vector2(175, 44)
+	model_row.add_child(model_category_option)
+	var add_model_button := Button.new()
+	add_model_button.text = "ADD MODELS"
+	add_model_button.custom_minimum_size = Vector2(165, 44)
+	add_model_button.pressed.connect(open_model_file_dialog)
+	model_row.add_child(add_model_button)
+	var remove_model_button := Button.new()
+	remove_model_button.text = "REMOVE SELECTED"
+	remove_model_button.custom_minimum_size = Vector2(150, 44)
+	remove_model_button.pressed.connect(remove_selected_custom_model)
+	model_row.add_child(remove_model_button)
+	var scale_label := Label.new()
+	scale_label.text = "SCALE"
+	model_row.add_child(scale_label)
+	model_scale_spin = SpinBox.new()
+	model_scale_spin.min_value = 0.05
+	model_scale_spin.max_value = 20.0
+	model_scale_spin.step = 0.05
+	model_scale_spin.value = 1.0
+	model_scale_spin.custom_minimum_size = Vector2(115, 42)
+	model_scale_spin.value_changed.connect(update_selected_model_scale)
+	model_row.add_child(model_scale_spin)
+
+	custom_model_list = ItemList.new()
+	custom_model_list.custom_minimum_size = Vector2(0, 58)
+	custom_model_list.add_item("No custom 3D objects added")
+	custom_model_list.item_selected.connect(select_custom_model)
+	content.add_child(custom_model_list)
+	model_file_dialog = FileDialog.new()
+	model_file_dialog.access = FileDialog.ACCESS_FILESYSTEM
+	model_file_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILES
+	model_file_dialog.filters = PackedStringArray(["*.glb, *.gltf ; glTF 3D Models"])
+	model_file_dialog.files_selected.connect(load_external_models)
+	builder_overlay.add_child(model_file_dialog)
 
 	create_round_selector(content, "MOVEMENTS IN THIS ROUND", round_checks, ["JUMP"])
 
@@ -457,6 +878,7 @@ func selected_actions(checks: Dictionary) -> Array[String]:
 func apply_builder_settings() -> void:
 	video_duration = duration_spin.value
 	active_theme = theme_option.get_item_text(theme_option.selected)
+	active_layout = layout_option.get_item_text(layout_option.selected)
 	apply_theme_environment()
 	course_length = video_duration * speed
 	events.clear()
@@ -479,12 +901,18 @@ func apply_theme_environment() -> void:
 		"Candy":
 			world_environment.background_color = Color("55baf2")
 			world_environment.ambient_light_color = Color("fff5f7")
+			world_environment.ambient_light_energy = 0.36
+			sun_light.light_energy = 0.70
 		"Block World":
 			world_environment.background_color = Color("75b9ee")
 			world_environment.ambient_light_color = Color("e8f3ff")
+			world_environment.ambient_light_energy = 0.34
+			sun_light.light_energy = 0.76
 		"Metro":
 			world_environment.background_color = Color("18202b")
 			world_environment.ambient_light_color = Color("9db4d1")
+			world_environment.ambient_light_energy = 0.24
+			sun_light.light_energy = 0.55
 
 func _process(delta: float) -> void:
 	if builder_active:
