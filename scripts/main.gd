@@ -548,10 +548,20 @@ func create_obstacle_visual(action: String, position: Vector3, target_size: Vect
 	if bounds.size == Vector3.ZERO:
 		instance.queue_free()
 		return null
-	var scale_factor := minf(target_size.x / maxf(bounds.size.x, 0.001), target_size.y / maxf(bounds.size.y, 0.001))
-	scale_factor = minf(scale_factor, target_size.z / maxf(bounds.size.z, 0.001))
-	scale_factor *= obstacle_scale_spin.value if obstacle_scale_spin else 1.0
-	instance.scale = Vector3.ONE * scale_factor
+	var user_scale := obstacle_scale_spin.value if obstacle_scale_spin else 1.0
+	if action == "JUMP":
+		# Compact props keep their original proportions.
+		var scale_factor := minf(target_size.x / maxf(bounds.size.x, 0.001), target_size.y / maxf(bounds.size.y, 0.001))
+		scale_factor = minf(scale_factor, target_size.z / maxf(bounds.size.z, 0.001))
+		instance.scale = Vector3.ONE * scale_factor * user_scale
+	else:
+		# Gate-like obstacles must span their complete gameplay area even when
+		# the generated model has different source proportions.
+		instance.scale = Vector3(
+			target_size.x / maxf(bounds.size.x, 0.001),
+			target_size.y / maxf(bounds.size.y, 0.001),
+			target_size.z / maxf(bounds.size.z, 0.001)
+		) * user_scale
 	instance.position = position
 	var world_bounds := calculate_world_mesh_bounds(instance)
 	instance.global_position += Vector3(position.x - world_bounds.get_center().x, -world_bounds.position.y, position.z - world_bounds.get_center().z)
