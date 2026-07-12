@@ -63,11 +63,20 @@ var custom_model_names: Array[String] = []
 var custom_model_scales: Array[float] = []
 var custom_model_categories: Array[String] = []
 var custom_model_paths: Array[String] = []
+var custom_animation_paths: Array[String] = []
 var custom_library_root: Node3D
 var occupied_environment_spots: Array[Dictionary] = []
 var surface_textures: Dictionary = {}
 var obstacle_model_prototypes: Dictionary = {}
 var obstacle_model_next_indices: Dictionary = {}
+var companion_option: OptionButton
+var companion_scale_spin: SpinBox
+var companion_root: Node3D
+var companion_visual: Node3D
+var companion_model_index := -1
+var companion_run_time := 0.0
+var companion_visual_base_y := 0.0
+var companion_size := 1.0
 const SURFACE_TILE_SIZE := 1.0
 
 func _ready() -> void:
@@ -75,6 +84,7 @@ func _ready() -> void:
 	build_ui()
 	build_builder_ui()
 	load_models_from_category_folders()
+	refresh_companion_options()
 	load_obstacle_models()
 	apply_builder_settings()
 	builder_overlay.visible = true
@@ -118,6 +128,10 @@ func build_world() -> void:
 	custom_library_root.name = "CustomModelLibrary"
 	custom_library_root.visible = false
 	add_child(custom_library_root)
+	companion_root = Node3D.new()
+	companion_root.name = "RunnerCompanion"
+	add_child(companion_root)
+	companion_root.visible = false
 
 func load_background_panorama() -> void:
 	var folder_path := "res://assets/textures/background"
@@ -626,10 +640,19 @@ func load_external_model(path: String, category_override: String = "") -> void:
 	var category := category_override if not category_override.is_empty() else model_category_option.get_item_text(model_category_option.selected)
 	custom_model_categories.append(category)
 	custom_model_paths.append(normalized_path)
+	var animation_path := find_paired_animation(path) if category == "CHARACTERS" else ""
+	custom_animation_paths.append(animation_path)
 	custom_model_list.add_item("[%s]  %s" % [category, file_name])
 	var new_index := custom_model_prototypes.size() - 1
 	custom_model_list.select(new_index)
 	model_scale_spin.value = custom_model_scales[new_index]
+
+func find_paired_animation(model_path: String) -> String:
+	var expected_name := model_path.get_file().get_basename().to_lower()
+	for sibling_name in DirAccess.get_files_at(model_path.get_base_dir()):
+		if sibling_name.get_extension().to_lower() == "fbx" and sibling_name.get_basename().to_lower() == expected_name:
+			return ProjectSettings.localize_path(model_path.get_base_dir().path_join(sibling_name))
+	return ""
 
 func calculate_model_bounds(root: Node3D) -> AABB:
 	var combined := AABB(Vector3.ZERO, Vector3.ZERO)
@@ -662,6 +685,7 @@ func remove_selected_custom_model() -> void:
 	custom_model_scales.remove_at(index)
 	custom_model_categories.remove_at(index)
 	custom_model_paths.remove_at(index)
+	custom_animation_paths.remove_at(index)
 	custom_model_list.remove_item(index)
 	prototype.queue_free()
 	if custom_model_prototypes.is_empty():
@@ -683,6 +707,144 @@ func update_selected_model_scale(value: float) -> void:
 	var index := selected[0]
 	if index >= 0 and index < custom_model_scales.size():
 		custom_model_scales[index] = value
+
+func refresh_companion_options() -> void:
+	if not companion_option:
+		return
+	companion_option.clear()
+	companion_option.add_item("None")
+	companion_option.set_item_metadata(0, -1)
+	var preferred_item := -1
+	for index in range(custom_model_categories.size()):
+		if custom_model_categories[index] == "CHARACTERS":
+			companion_option.add_item(custom_model_names[index].get_basename().capitalize())
+			companion_option.set_item_metadata(companion_option.item_count - 1, index)
+			if index < custom_animation_paths.size() and not custom_animation_paths[index].is_empty():
+				preferred_item = companion_option.item_count - 1
+	if preferred_item >= 0:
+		companion_option.select(preferred_item)
+	elif companion_option.item_count > 1:
+		companion_option.select(1)
+
+func rebuild_companion() -> void:
+	if companion_visual:
+		companion_visual.queue_free()
+		companion_visual = null
+	companion_model_index = int(companion_option.get_selected_metadata()) if companion_option else -1
+	if companion_model_index < 0 or companion_model_index >= custom_model_prototypes.size():
+		companion_root.visible = false
+		return
+	companion_visual = instantiate_paired_companion(companion_model_index)
+	if not companion_visual:
+		companion_visual = custom_model_prototypes[companion_model_index].duplicate()
+	companion_root.add_child(companion_visual)
+	var bounds := calculate_model_bounds(companion_visual)
+	var target_height := 1.55 * companion_size
+	var fit_scale := target_height / maxf(bounds.size.y, 0.001) * custom_model_scales[companion_model_index]
+	companion_visual.scale = Vector3.ONE * fit_scale
+	companion_visual.position = Vector3(-bounds.get_center().x * fit_scale, -bounds.position.y * fit_scale, 0)
+	companion_visual_base_y = companion_visual.position.y
+	companion_visual.rotation.y = PI
+	for animation_player in companion_visual.find_children("*", "AnimationPlayer", true, false):
+		var player := animation_player as AnimationPlayer
+		var animations := player.get_animation_list()
+		if not animations.is_empty():
+			var chosen := StringName()
+			for animation_name in animations:
+				if "run" in String(animation_name).to_lower() or "walk" in String(animation_name).to_lower():
+					chosen = animation_name
+					break
+				if String(animation_name).to_upper() != "RESET" and chosen.is_empty():
+					chosen = animation_name
+			if not chosen.is_empty():
+				var run_animation := player.get_animation(chosen)
+				if run_animation:
+					remove_companion_root_motion(run_animation)
+					run_animation.loop_mode = Animation.LOOP_LINEAR
+				player.active = true
+				player.play(chosen)
+	companion_run_time = 0.0
+	companion_root.visible = true
+
+func remove_companion_root_motion(animation: Animation) -> void:
+	# Mixamo clips often move the hips forward. The runner's world movement is
+	# controlled by code, so that displacement would snap back on every loop.
+	for track_index in range(animation.get_track_count()):
+		if animation.track_get_type(track_index) != Animation.TYPE_POSITION_3D:
+			continue
+		var track_path := String(animation.track_get_path(track_index)).to_lower()
+		if "hips" not in track_path and "root" not in track_path:
+			continue
+		if animation.track_get_key_count(track_index) == 0:
+			continue
+		var first_position: Vector3 = animation.track_get_key_value(track_index, 0)
+		for key_index in range(animation.track_get_key_count(track_index)):
+			var position: Vector3 = animation.track_get_key_value(track_index, key_index)
+			position.x = first_position.x
+			position.z = first_position.z
+			animation.track_set_key_value(track_index, key_index, position)
+
+func instantiate_paired_companion(model_index: int) -> Node3D:
+	if model_index < 0 or model_index >= custom_animation_paths.size():
+		return null
+	var animation_path := custom_animation_paths[model_index]
+	if animation_path.is_empty():
+		return null
+	var packed_animation_scene := ResourceLoader.load(animation_path) as PackedScene
+	if not packed_animation_scene:
+		push_warning("Could not load companion animation: %s" % animation_path)
+		return null
+	var animated_model := packed_animation_scene.instantiate() as Node3D
+	if not animated_model:
+		return null
+	var color_meshes := custom_model_prototypes[model_index].find_children("*", "MeshInstance3D", true, false)
+	var animated_meshes := animated_model.find_children("*", "MeshInstance3D", true, false)
+	if color_meshes.is_empty() or animated_meshes.is_empty():
+		animated_model.queue_free()
+		return null
+	for mesh_index in range(animated_meshes.size()):
+		var animated_mesh := animated_meshes[mesh_index] as MeshInstance3D
+		var color_mesh := color_meshes[mini(mesh_index, color_meshes.size() - 1)] as MeshInstance3D
+		if not animated_mesh.mesh or not color_mesh.mesh:
+			continue
+		for surface_index in range(animated_mesh.mesh.get_surface_count()):
+			var color_surface := mini(surface_index, color_mesh.mesh.get_surface_count() - 1)
+			var material := color_mesh.get_active_material(color_surface)
+			if material:
+				animated_mesh.set_surface_override_material(surface_index, material)
+	return animated_model
+
+func update_companion(delta: float) -> void:
+	if not companion_visual or not companion_root.visible:
+		return
+	if countdown <= 0.0 and not finished:
+		companion_run_time += delta
+	var elapsed_run_time := distance / maxf(speed, 0.001)
+	if elapsed_run_time >= 10.2:
+		companion_root.visible = false
+		return
+	var side := 2.35
+	var forward_offset := -5.2
+	if elapsed_run_time > 7.0:
+		var overtake_phase := clampf((elapsed_run_time - 7.0) / 2.0, 0.0, 1.0)
+		forward_offset = lerpf(-5.2, 3.2, smoothstep(0.0, 1.0, overtake_phase))
+		side = lerpf(2.35, 1.6, overtake_phase)
+	var companion_progress := distance - forward_offset
+	var jump_offset := 0.0
+	for event in events:
+		if event.action != "JUMP":
+			continue
+		var jump_distance := maxf(speed * 0.82, 0.001)
+		var jump_phase := (companion_progress - (float(event.distance) - 1.5)) / jump_distance
+		if jump_phase >= 0.0 and jump_phase <= 1.0:
+			jump_offset = sin(jump_phase * PI) * 1.8 * companion_size
+			break
+	var target := Vector3(camera_rig.position.x + side, jump_offset, camera_rig.position.z + forward_offset)
+	companion_root.position = companion_root.position.lerp(target, 1.0 - exp(-7.0 * delta))
+	var run_amount := 1.0 if countdown <= 0.0 and not finished else 0.2
+	var target_bob := companion_visual_base_y + sin(companion_run_time * 11.0) * 0.07 * run_amount
+	companion_visual.position.y = lerpf(companion_visual.position.y, target_bob, minf(delta * 12.0, 1.0))
+	companion_visual.rotation.z = sin(companion_run_time * 5.5) * 0.035 * run_amount
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_ESCAPE:
@@ -1018,6 +1180,29 @@ func build_builder_ui() -> void:
 	obstacle_scale_spin.custom_minimum_size = Vector2(130, 42)
 	obstacle_scale_row.add_child(obstacle_scale_spin)
 
+	var companion_row := HBoxContainer.new()
+	companion_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	content.add_child(companion_row)
+	var companion_label := Label.new()
+	companion_label.text = "RUNNING COMPANION   "
+	companion_label.add_theme_font_size_override("font_size", 20)
+	companion_row.add_child(companion_label)
+	companion_option = OptionButton.new()
+	companion_option.add_item("None")
+	companion_option.set_item_metadata(0, -1)
+	companion_option.custom_minimum_size = Vector2(260, 42)
+	companion_row.add_child(companion_option)
+	var companion_scale_label := Label.new()
+	companion_scale_label.text = "   SIZE"
+	companion_row.add_child(companion_scale_label)
+	companion_scale_spin = SpinBox.new()
+	companion_scale_spin.min_value = 0.35
+	companion_scale_spin.max_value = 3.0
+	companion_scale_spin.step = 0.05
+	companion_scale_spin.value = 1.0
+	companion_scale_spin.custom_minimum_size = Vector2(105, 42)
+	companion_row.add_child(companion_scale_spin)
+
 	var model_row := HBoxContainer.new()
 	model_row.alignment = BoxContainer.ALIGNMENT_CENTER
 	model_row.add_theme_constant_override("separation", 12)
@@ -1110,6 +1295,7 @@ func selected_actions(checks: Dictionary) -> Array[String]:
 
 func apply_builder_settings() -> void:
 	video_duration = duration_spin.value
+	companion_size = companion_scale_spin.value
 	active_theme = theme_option.get_item_text(theme_option.selected)
 	active_layout = layout_option.get_item_text(layout_option.selected)
 	apply_theme_environment()
@@ -1125,6 +1311,7 @@ func apply_builder_settings() -> void:
 		event_time += 4.0
 	progress_bar.max_value = course_length
 	build_course()
+	rebuild_companion()
 	restart()
 	builder_active = false
 	builder_overlay.visible = false
@@ -1225,6 +1412,7 @@ func _process(delta: float) -> void:
 	if not finished and countdown <= 0.0:
 		update_action_hint()
 	update_feedback(delta)
+	update_companion(delta)
 
 func update_action_hint() -> void:
 	action_label.text = ""
@@ -1443,6 +1631,10 @@ func restart() -> void:
 	if action_icon:
 		action_icon.scale = Vector2.ONE
 	camera_rig.position = start_position
+	if companion_root:
+		companion_root.position = Vector3(start_position.x + 2.35, 0.0, start_position.z - 5.2)
+		companion_run_time = 0.0
+		companion_root.visible = companion_visual != null and companion_model_index >= 0
 	if action_label:
 		action_label.text = "3"
 	if action_icon:
