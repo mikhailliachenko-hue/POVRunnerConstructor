@@ -3,3 +3,6 @@
 *.log
 .DS_Store
 Thumbs.db
+
+# Local source videos and visual references must never be published.
+/референс/
