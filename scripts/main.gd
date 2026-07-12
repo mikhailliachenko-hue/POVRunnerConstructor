@@ -64,6 +64,7 @@ var custom_model_paths: Array[String] = []
 var custom_library_root: Node3D
 var occupied_environment_spots: Array[Dictionary] = []
 var surface_textures: Dictionary = {}
+var obstacle_model_prototypes: Dictionary = {}
 const SURFACE_TILE_SIZE := 1.0
 
 func _ready() -> void:
@@ -71,6 +72,7 @@ func _ready() -> void:
 	build_ui()
 	build_builder_ui()
 	load_models_from_category_folders()
+	load_obstacle_models()
 	apply_builder_settings()
 	builder_overlay.visible = true
 	builder_active = true
@@ -498,6 +500,52 @@ func load_models_from_category_folders() -> void:
 			var resource_path := folder_path.path_join(file_name)
 			load_external_model(ProjectSettings.globalize_path(resource_path), category)
 
+func load_obstacle_models() -> void:
+	obstacle_model_prototypes.clear()
+	for action in ["JUMP", "DUCK", "LEFT", "RIGHT", "SMASH"]:
+		var folder_path := "res://модели/obstacles/%s" % action.to_lower()
+		var model_files: Array[String] = []
+		for file_name in DirAccess.get_files_at(folder_path):
+			if file_name.get_extension().to_lower() in ["glb", "gltf"]:
+				model_files.append(file_name)
+		model_files.sort()
+		if model_files.is_empty():
+			continue
+		var document := GLTFDocument.new()
+		var state := GLTFState.new()
+		var resource_path := folder_path.path_join(model_files[0])
+		var error := document.append_from_file(ProjectSettings.globalize_path(resource_path), state)
+		if error != OK:
+			push_warning("Could not load %s obstacle model: %s" % [action, error_string(error)])
+			continue
+		var generated := document.generate_scene(state)
+		if generated is Node3D:
+			var prototype := generated as Node3D
+			prototype.name = "%sObstaclePrototype" % action.capitalize()
+			prototype.visible = false
+			custom_library_root.add_child(prototype)
+			obstacle_model_prototypes[action] = prototype
+
+func create_obstacle_visual(action: String, position: Vector3, target_size: Vector3) -> Node3D:
+	if not obstacle_model_prototypes.has(action):
+		return null
+	var prototype: Node3D = obstacle_model_prototypes[action]
+	var instance := prototype.duplicate() as Node3D
+	instance.name = "%s_CustomVisual" % action
+	instance.visible = true
+	course_root.add_child(instance)
+	var bounds := calculate_model_bounds(instance)
+	if bounds.size == Vector3.ZERO:
+		instance.queue_free()
+		return null
+	var scale_factor := minf(target_size.x / maxf(bounds.size.x, 0.001), target_size.y / maxf(bounds.size.y, 0.001))
+	scale_factor = minf(scale_factor, target_size.z / maxf(bounds.size.z, 0.001))
+	instance.scale = Vector3.ONE * scale_factor
+	instance.position = position
+	var world_bounds := calculate_world_mesh_bounds(instance)
+	instance.global_position += Vector3(position.x - world_bounds.get_center().x, -world_bounds.position.y, position.z - world_bounds.get_center().z)
+	return instance
+
 func load_external_models(paths: PackedStringArray) -> void:
 	if custom_model_prototypes.is_empty() and custom_model_list.item_count > 0:
 		custom_model_list.clear()
@@ -602,12 +650,16 @@ func create_dodge_gate(z: float, action: String, color: Color) -> void:
 	# Игрок начинает каждый манёвр из центра. Две полосы перекрыты,
 	# поэтому остаётся только коридор в сторону указанного действия.
 	var open_lane := 2 if action == "RIGHT" else 0
+	if create_obstacle_visual(action, Vector3(0, 0, z), Vector3(7.0, 4.8, 1.6)):
+		return
 	for obstacle_lane in range(3):
 		if obstacle_lane != open_lane:
 			create_obstacle(obstacle_lane, z, color, action, 4.8)
 
 func create_duck_gate(z: float, color: Color) -> void:
 	# Верхняя балка оставляет проход только для приседания.
+	if create_obstacle_visual("DUCK", Vector3(0, 0, z), Vector3(10.5, 4.7, 1.8)):
+		return
 	create_box("DuckGateTop", Vector3(10.5, 1.35, 1.8), Vector3(0, 2.35, z), color)
 	create_box("DuckGateLeft", Vector3(0.65, 4.7, 1.8), Vector3(-5.0, 2.1, z), color)
 	create_box("DuckGateRight", Vector3(0.65, 4.7, 1.8), Vector3(5.0, 2.1, z), color)
@@ -616,6 +668,8 @@ func create_smash_gate(z: float, color: Color) -> Array[MeshInstance3D]:
 	# One unified wall mesh. Later its two materials will receive the
 	# user-selected intact and cracked image textures.
 	var targets: Array[MeshInstance3D] = []
+	if create_obstacle_visual("SMASH", Vector3(0, 0, z), Vector3(10.5, 4.6, 0.55)):
+		return targets
 	var wall := create_box("SmashWall", Vector3(10.5, 4.6, 0.55), Vector3(0, 2.15, z), color)
 	var intact_material := make_material(color)
 	if ResourceLoader.exists("res://assets/smash_wall/intact.png"):
@@ -639,6 +693,7 @@ func create_obstacle(obstacle_lane: int, z: float, color: Color, action: String,
 	var obstacle_size := Vector3(1.35, 1.35, 1.35) if action == "JUMP" else Vector3(2.55, height, 1.6)
 	if action == "JUMP":
 		body.position.y = 0.675
+	var custom_visual := create_obstacle_visual(action, Vector3(LANE_X[obstacle_lane], 0, z), obstacle_size)
 	var mesh_instance := MeshInstance3D.new()
 	mesh_instance.name = "%s_Visual" % action
 	var mesh := BoxMesh.new()
@@ -649,7 +704,8 @@ func create_obstacle(obstacle_lane: int, z: float, color: Color, action: String,
 	obstacle_material.emission = color
 	obstacle_material.emission_energy_multiplier = 0.32
 	mesh_instance.material_override = obstacle_material
-	body.add_child(mesh_instance)
+	if not custom_visual:
+		body.add_child(mesh_instance)
 	var shape := CollisionShape3D.new()
 	var box := BoxShape3D.new()
 	box.size = obstacle_size
