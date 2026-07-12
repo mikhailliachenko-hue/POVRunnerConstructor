@@ -52,6 +52,7 @@ var active_theme := "Candy"
 var layout_option: OptionButton
 var active_layout := "Open World"
 var density_spin: SpinBox
+var obstacle_scale_spin: SpinBox
 var model_scale_spin: SpinBox
 var model_category_option: OptionButton
 var model_file_dialog: FileDialog
@@ -549,6 +550,7 @@ func create_obstacle_visual(action: String, position: Vector3, target_size: Vect
 		return null
 	var scale_factor := minf(target_size.x / maxf(bounds.size.x, 0.001), target_size.y / maxf(bounds.size.y, 0.001))
 	scale_factor = minf(scale_factor, target_size.z / maxf(bounds.size.z, 0.001))
+	scale_factor *= obstacle_scale_spin.value if obstacle_scale_spin else 1.0
 	instance.scale = Vector3.ONE * scale_factor
 	instance.position = position
 	var world_bounds := calculate_world_mesh_bounds(instance)
@@ -966,6 +968,21 @@ func build_builder_ui() -> void:
 	density_spin.suffix = "%"
 	density_spin.custom_minimum_size = Vector2(130, 42)
 	density_row.add_child(density_spin)
+
+	var obstacle_scale_row := HBoxContainer.new()
+	obstacle_scale_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	content.add_child(obstacle_scale_row)
+	var obstacle_scale_label := Label.new()
+	obstacle_scale_label.text = "OBSTACLE MODEL SCALE   "
+	obstacle_scale_label.add_theme_font_size_override("font_size", 20)
+	obstacle_scale_row.add_child(obstacle_scale_label)
+	obstacle_scale_spin = SpinBox.new()
+	obstacle_scale_spin.min_value = 0.25
+	obstacle_scale_spin.max_value = 3.0
+	obstacle_scale_spin.step = 0.05
+	obstacle_scale_spin.value = 1.0
+	obstacle_scale_spin.custom_minimum_size = Vector2(130, 42)
+	obstacle_scale_row.add_child(obstacle_scale_spin)
 
 	var model_row := HBoxContainer.new()
 	model_row.alignment = BoxContainer.ALIGNMENT_CENTER
