@@ -1,0 +1,13 @@
+# Nano Banana — препятствие JUMP
+
+Сгенерированное изображение должно показывать одно низкое препятствие, через которое игрок явно должен перепрыгнуть. Промпт готов для вставки целиком.
+
+```text
+Create a single production-quality 3D game-asset concept image of a LOW JUMP OBSTACLE for a first-person endless runner set in a bright stylized voxel/block world. The asset must read instantly as something the player should jump over: a compact reinforced obstacle made from two heavy blocky crates and a thick central iron-banded beam, forming one solid connected object. Keep the total silhouette low and wide, approximately 1.35 m wide, 1.35 m tall, and 1.35 m deep in real-world proportions. The top must be clearly below normal eye level, with a strong horizontal silhouette and no overhead elements. Use chunky Minecraft-inspired geometry without copying any protected character or exact existing game asset: beveled cubes, simplified construction, clean square shapes, slightly exaggerated proportions, hand-painted pixel-like PBR textures, dark iron corners, warm orange-brown wood, small yellow hazard accents, subtle scratches and edge wear. The object must look sturdy but visually safe to jump over, with no thin spikes, wires, chains, handles, floating fragments, transparent parts, or delicate details.
+
+Show exactly ONE isolated object, fully visible from bottom to top, centered in frame, standing directly on an invisible flat ground plane. Use a three-quarter front view from slightly above, equivalent to a 70 mm lens, with minimal perspective distortion so the front, one side, and top surfaces are all readable for image-to-3D reconstruction. Orthographic-like product presentation, symmetrical and coherent construction, closed watertight-looking forms, realistic thickness everywhere, no hidden disconnected pieces. Neutral light-gray seamless studio background, soft large-area key light from upper left, gentle fill light, subtle contact shadow directly beneath the asset, even exposure, sharp focus, high texture clarity, no dramatic fog or colored environment lighting.
+
+The image must contain only the asset and its soft contact shadow. No character, no road, no scenery, no fence, no platform, no pedestal, no text, no letters, no numbers, no arrows, no logo, no watermark, no UI, no border, no cropped geometry, no duplicate object. Do not create a flat illustration: render it as a believable textured 3D object suitable as a clean reference for conversion into a GLB game model. Square 1:1 composition, high resolution, asset occupying about 75% of the canvas with clear empty margin on every side.
+```
+
+🎯 Target: Nano Banana, 💡 оптимизировано для чистого ракурса image-to-3D и мгновенно читаемого низкого препятствия JUMP.
