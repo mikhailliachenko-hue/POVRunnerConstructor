@@ -175,8 +175,15 @@ func build_course() -> void:
 			"JUMP":
 				# Block all three lanes so the required action reads as a jump,
 				# rather than an obstacle the player could simply dodge around.
+				# One event uses three copies of the same model; the next event
+				# advances to the next available JUMP variant.
+				var jump_variants: Array = obstacle_model_prototypes.get("JUMP", [])
+				var jump_variant_index := -1
+				if not jump_variants.is_empty():
+					jump_variant_index = int(obstacle_model_next_indices.get("JUMP", 0)) % jump_variants.size()
+					obstacle_model_next_indices["JUMP"] = jump_variant_index + 1
 				for obstacle_lane in range(3):
-					create_obstacle(obstacle_lane, z_position, colors[index % colors.size()], "JUMP", 1.5)
+					create_obstacle(obstacle_lane, z_position, colors[index % colors.size()], "JUMP", 1.5, jump_variant_index)
 			"DUCK": create_duck_gate(z_position, colors[index % colors.size()])
 			"LEFT", "RIGHT": create_dodge_gate(z_position, str(event.action), colors[index % colors.size()])
 			"SMASH": event["targets"] = create_smash_gate(z_position, colors[index % colors.size()])
@@ -536,14 +543,18 @@ func load_obstacle_models() -> void:
 		if not prototypes.is_empty():
 			obstacle_model_prototypes[action] = prototypes
 
-func create_obstacle_visual(action: String, position: Vector3, target_size: Vector3) -> Node3D:
+func create_obstacle_visual(action: String, position: Vector3, target_size: Vector3, variant_index: int = -1) -> Node3D:
 	if not obstacle_model_prototypes.has(action):
 		return null
 	var prototypes: Array = obstacle_model_prototypes[action]
 	if prototypes.is_empty():
 		return null
-	var next_index := int(obstacle_model_next_indices.get(action, 0)) % prototypes.size()
-	obstacle_model_next_indices[action] = next_index + 1
+	var next_index := variant_index
+	if next_index < 0:
+		next_index = int(obstacle_model_next_indices.get(action, 0)) % prototypes.size()
+		obstacle_model_next_indices[action] = next_index + 1
+	else:
+		next_index %= prototypes.size()
 	var prototype := prototypes[next_index] as Node3D
 	var instance := prototype.duplicate() as Node3D
 	instance.name = "%s_CustomVisual" % action
@@ -719,7 +730,7 @@ func create_smash_gate(z: float, color: Color) -> Array[MeshInstance3D]:
 	targets.append(wall)
 	return targets
 
-func create_obstacle(obstacle_lane: int, z: float, color: Color, action: String, height: float) -> void:
+func create_obstacle(obstacle_lane: int, z: float, color: Color, action: String, height: float, variant_index: int = -1) -> void:
 	var body := StaticBody3D.new()
 	body.name = "Obstacle_%s" % action
 	body.position = Vector3(LANE_X[obstacle_lane], height * 0.5, z)
@@ -727,7 +738,7 @@ func create_obstacle(obstacle_lane: int, z: float, color: Color, action: String,
 	var obstacle_size := Vector3(2.8, 1.35, 1.35) if action == "JUMP" else Vector3(2.55, height, 1.6)
 	if action == "JUMP":
 		body.position.y = 0.675
-	var custom_visual := create_obstacle_visual(action, Vector3(LANE_X[obstacle_lane], 0, z), obstacle_size)
+	var custom_visual := create_obstacle_visual(action, Vector3(LANE_X[obstacle_lane], 0, z), obstacle_size, variant_index)
 	var mesh_instance := MeshInstance3D.new()
 	mesh_instance.name = "%s_Visual" % action
 	var mesh := BoxMesh.new()
