@@ -5,6 +5,7 @@ const DODGE_DURATION := 1.8
 const DUCK_DURATION := 1.25
 const DUCK_DEPTH := 1.05
 const ACTION_WINDOW := 12.0
+const DEFAULT_SMASH_HIT_GAP := 1.8
 const DUCK_VISUAL_SINK := 0.6
 var speed := 12.0
 var course_length := 180.0
@@ -48,12 +49,18 @@ var builder_active := true
 var builder_overlay: ColorRect
 var duration_spin: SpinBox
 var round_checks: Dictionary = {}
+var round_option: OptionButton
+var active_round := "round_01"
+var image_panels_check: CheckButton
+var image_panel_events: Array[Dictionary] = []
 var theme_option: OptionButton
 var active_theme := "Candy"
 var layout_option: OptionButton
 var active_layout := "Open World"
 var density_spin: SpinBox
 var obstacle_scale_spin: SpinBox
+var smash_actor_scale_spin: SpinBox
+var smash_hit_gap_spin: SpinBox
 var model_scale_spin: SpinBox
 var model_category_option: OptionButton
 var model_file_dialog: FileDialog
@@ -69,6 +76,13 @@ var occupied_environment_spots: Array[Dictionary] = []
 var surface_textures: Dictionary = {}
 var obstacle_model_prototypes: Dictionary = {}
 var obstacle_model_next_indices: Dictionary = {}
+var round_model_list: ItemList
+var round_model_scale_spin: SpinBox
+var round_model_entries: Array[Dictionary] = []
+var round_model_scales: Dictionary = {}
+var round_preview_viewport: SubViewport
+var round_preview_root: Node3D
+var round_preview_camera: Camera3D
 var companion_option: OptionButton
 var companion_scale_spin: SpinBox
 var companion_root: Node3D
@@ -86,6 +100,7 @@ func _ready() -> void:
 	load_models_from_category_folders()
 	refresh_companion_options()
 	load_obstacle_models()
+	refresh_round_model_list()
 	apply_builder_settings()
 	builder_overlay.visible = true
 	builder_active = true
@@ -134,7 +149,7 @@ func build_world() -> void:
 	companion_root.visible = false
 
 func load_background_panorama() -> void:
-	var folder_path := "res://assets/textures/background"
+	var folder_path := "res://раунды/%s/textures/background" % active_round
 	var image_files: Array[String] = []
 	for file_name in DirAccess.get_files_at(folder_path):
 		if file_name.get_extension().to_lower() in ["png", "jpg", "jpeg", "webp", "hdr", "exr"]:
@@ -158,7 +173,7 @@ func load_background_panorama() -> void:
 func load_surface_textures() -> void:
 	surface_textures.clear()
 	for slot in ["road", "ground"]:
-		var folder_path := "res://assets/textures/%s" % slot
+		var folder_path := "res://раунды/%s/textures/%s" % [active_round, slot]
 		var image_files: Array[String] = []
 		for file_name in DirAccess.get_files_at(folder_path):
 			if file_name.get_extension().to_lower() in ["png", "jpg", "jpeg", "webp"]:
@@ -173,6 +188,7 @@ func load_surface_textures() -> void:
 func build_course() -> void:
 	for child in course_root.get_children():
 		child.queue_free()
+	image_panel_events.clear()
 	obstacle_model_next_indices.clear()
 	var road_color := theme_color("road")
 	create_box("Road", Vector3(11, 0.25, course_length + 20), Vector3(0, -0.25, -course_length * 0.5 + 5), road_color)
@@ -202,10 +218,56 @@ func build_course() -> void:
 			"LEFT", "RIGHT": create_dodge_gate(z_position, str(event.action), colors[index % colors.size()])
 			"SMASH": event["targets"] = create_smash_gate(z_position, colors[index % colors.size()])
 
+	create_random_image_panels()
+
 	var finish_z := start_position.z - course_length
 	create_box("FinishTop", Vector3(11, 0.55, 0.55), Vector3(0, 5.7, finish_z), Color.WHITE)
 	create_box("FinishLeft", Vector3(0.55, 6, 0.55), Vector3(-5.2, 2.8, finish_z), Color.WHITE)
 	create_box("FinishRight", Vector3(0.55, 6, 0.55), Vector3(5.2, 2.8, finish_z), Color.WHITE)
+
+func create_random_image_panels() -> void:
+	if not image_panels_check or not image_panels_check.button_pressed:
+		return
+	var folder_path := "res://assets/image_panels"
+	var image_files: Array[String] = []
+	for file_name in DirAccess.get_files_at(folder_path):
+		if file_name.get_extension().to_lower() in ["png", "jpg", "jpeg", "webp"]:
+			image_files.append(file_name)
+	if image_files.is_empty():
+		return
+	# Shuffle once and consume each entry once: placement is random, repetition
+	# inside one generated round is impossible.
+	image_files.shuffle()
+	var candidate_times: Array[float] = []
+	var candidate_time := 2.0
+	while candidate_time < video_duration - 2.0:
+		candidate_times.append(candidate_time)
+		candidate_time += 8.0
+	candidate_times.shuffle()
+	var panel_count := mini(image_files.size(), candidate_times.size())
+	for index in range(panel_count):
+		var texture := load(folder_path.path_join(image_files[index])) as Texture2D
+		if not texture:
+			continue
+		var panel_height := 3.2
+		# Span almost the entire 11 m road. Keep the established height so the
+		# pose stays readable without turning the panel into an excessively tall
+		# wall for the 3:2 source images.
+		var panel_width := 10.4
+		var panel := MeshInstance3D.new()
+		panel.name = "ImagePanel_%d" % index
+		var quad := QuadMesh.new()
+		quad.size = Vector2(panel_width, panel_height)
+		panel.mesh = quad
+		panel.position = Vector3(0, panel_height * 0.5 + 0.15, start_position.z - candidate_times[index] * speed)
+		var material := StandardMaterial3D.new()
+		material.albedo_texture = texture
+		material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		material.cull_mode = BaseMaterial3D.CULL_DISABLED
+		material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		panel.material_override = material
+		course_root.add_child(panel)
+		image_panel_events.append({"distance": candidate_times[index] * speed, "triggered": false})
 
 func create_tree(pos: Vector3, index: int) -> void:
 	create_cylinder(Vector3(pos.x, 1.25, pos.z), 0.24, 2.5, Color("f1eee2"))
@@ -530,9 +592,14 @@ func load_models_from_category_folders() -> void:
 			load_external_model(ProjectSettings.globalize_path(resource_path), category)
 
 func load_obstacle_models() -> void:
+	for prototypes in obstacle_model_prototypes.values():
+		for prototype in prototypes:
+			if is_instance_valid(prototype):
+				prototype.queue_free()
 	obstacle_model_prototypes.clear()
+	load_round_model_scales()
 	for action in ["JUMP", "DUCK", "LEFT", "RIGHT", "SMASH"]:
-		var folder_path := "res://модели/obstacles/%s" % action.to_lower()
+		var folder_path := "res://раунды/%s/%s" % [active_round, action.to_lower()]
 		var model_files: Array[String] = []
 		for file_name in DirAccess.get_files_at(folder_path):
 			if file_name.get_extension().to_lower() in ["glb", "gltf"]:
@@ -551,6 +618,7 @@ func load_obstacle_models() -> void:
 			if generated is Node3D:
 				var prototype := generated as Node3D
 				prototype.name = "%sObstaclePrototype_%d" % [action.capitalize(), prototypes.size()]
+				prototype.set_meta("round_model_key", "%s/%s" % [action.to_lower(), file_name])
 				prototype.visible = false
 				custom_library_root.add_child(prototype)
 				prototypes.append(prototype)
@@ -579,6 +647,9 @@ func create_obstacle_visual(action: String, position: Vector3, target_size: Vect
 		instance.queue_free()
 		return null
 	var user_scale := obstacle_scale_spin.value if obstacle_scale_spin else 1.0
+	if action == "SMASH" and smash_actor_scale_spin:
+		user_scale = smash_actor_scale_spin.value
+	user_scale *= float(round_model_scales.get(str(prototype.get_meta("round_model_key", "")), 1.0))
 	if action == "JUMP":
 		# Keep height/depth proportional, but span almost the complete lane so
 		# the obstacle cannot be mistaken for a small prop to walk around.
@@ -849,6 +920,7 @@ func update_companion(delta: float) -> void:
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_ESCAPE:
 		if not builder_active:
+			DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
 			builder_active = true
 			builder_overlay.visible = true
 			get_viewport().set_input_as_handled()
@@ -857,11 +929,16 @@ func create_dodge_gate(z: float, action: String, color: Color) -> void:
 	# Игрок начинает каждый манёвр из центра. Две полосы перекрыты,
 	# поэтому остаётся только коридор в сторону указанного действия.
 	var open_lane := 2 if action == "RIGHT" else 0
-	if create_obstacle_visual(action, Vector3(0, 0, z), Vector3(7.0, 4.8, 1.6)):
-		return
+	# Pick one variant for the event and duplicate that exact model across both
+	# blocked lanes. The next LEFT/RIGHT event advances to the next variant.
+	var variants: Array = obstacle_model_prototypes.get(action, [])
+	var variant_index := -1
+	if not variants.is_empty():
+		variant_index = int(obstacle_model_next_indices.get(action, 0)) % variants.size()
+		obstacle_model_next_indices[action] = variant_index + 1
 	for obstacle_lane in range(3):
 		if obstacle_lane != open_lane:
-			create_obstacle(obstacle_lane, z, color, action, 4.8)
+			create_obstacle(obstacle_lane, z, color, action, 4.8, variant_index)
 
 func create_duck_gate(z: float, color: Color) -> void:
 	# Верхняя балка оставляет проход только для приседания.
@@ -871,11 +948,15 @@ func create_duck_gate(z: float, color: Color) -> void:
 	create_box("DuckGateLeft", Vector3(0.65, 4.7, 1.8), Vector3(-5.0, 2.1, z), color)
 	create_box("DuckGateRight", Vector3(0.65, 4.7, 1.8), Vector3(5.0, 2.1, z), color)
 
-func create_smash_gate(z: float, color: Color) -> Array[MeshInstance3D]:
+func create_smash_gate(z: float, color: Color) -> Array[Node3D]:
 	# One unified wall mesh. Later its two materials will receive the
 	# user-selected intact and cracked image textures.
-	var targets: Array[MeshInstance3D] = []
-	if create_obstacle_visual("SMASH", Vector3(0, 0, z), Vector3(10.5, 4.6, 0.55)):
+	var targets: Array[Node3D] = []
+	var custom_visual := create_obstacle_visual("SMASH", Vector3(0, 0, z), Vector3(3.2, 4.6, 2.4))
+	if custom_visual:
+		custom_visual.set_meta("smash_actor", true)
+		custom_visual.set_meta("spawn_z", custom_visual.global_position.z)
+		targets.append(custom_visual)
 		return targets
 	var wall := create_box("SmashWall", Vector3(10.5, 4.6, 0.55), Vector3(0, 2.15, z), color)
 	var intact_material := make_material(color)
@@ -1091,9 +1172,17 @@ func build_builder_ui() -> void:
 	panel.position = Vector2(245, 18)
 	panel.size = Vector2(790, 684)
 	builder_overlay.add_child(panel)
+	var scroll := ScrollContainer.new()
+	scroll.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+	scroll.follow_focus = true
+	panel.add_child(scroll)
 	var content := VBoxContainer.new()
 	content.add_theme_constant_override("separation", 8)
-	panel.add_child(content)
+	content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	content.custom_minimum_size.x = 750
+	scroll.add_child(content)
 
 	var heading := Label.new()
 	heading.text = "POV RUNNER BUILDER"
@@ -1106,6 +1195,34 @@ func build_builder_ui() -> void:
 	subtitle.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	subtitle.add_theme_font_size_override("font_size", 18)
 	content.add_child(subtitle)
+
+	var round_row := HBoxContainer.new()
+	round_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	content.add_child(round_row)
+	var round_label := Label.new()
+	round_label.text = "ROUND CONTENT   "
+	round_label.add_theme_font_size_override("font_size", 20)
+	round_row.add_child(round_label)
+	round_option = OptionButton.new()
+	var round_names: Array[String] = []
+	for folder_name in DirAccess.get_directories_at("res://раунды"):
+		round_names.append(folder_name)
+	round_names.sort()
+	for folder_name in round_names:
+		round_option.add_item(folder_name.replace("_", " ").capitalize())
+		round_option.set_item_metadata(round_option.item_count - 1, folder_name)
+	round_option.custom_minimum_size = Vector2(210, 42)
+	round_option.item_selected.connect(on_round_content_selected)
+	round_row.add_child(round_option)
+
+	var image_panels_row := HBoxContainer.new()
+	image_panels_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	content.add_child(image_panels_row)
+	image_panels_check = CheckButton.new()
+	image_panels_check.text = "RANDOM IMAGE PANELS"
+	image_panels_check.button_pressed = true
+	image_panels_check.add_theme_font_size_override("font_size", 20)
+	image_panels_row.add_child(image_panels_check)
 
 	var duration_row := HBoxContainer.new()
 	duration_row.alignment = BoxContainer.ALIGNMENT_CENTER
@@ -1180,6 +1297,37 @@ func build_builder_ui() -> void:
 	obstacle_scale_spin.custom_minimum_size = Vector2(130, 42)
 	obstacle_scale_row.add_child(obstacle_scale_spin)
 
+	var smash_actor_scale_row := HBoxContainer.new()
+	smash_actor_scale_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	content.add_child(smash_actor_scale_row)
+	var smash_actor_scale_label := Label.new()
+	smash_actor_scale_label.text = "SMASH CHARACTER SIZE   "
+	smash_actor_scale_label.add_theme_font_size_override("font_size", 20)
+	smash_actor_scale_row.add_child(smash_actor_scale_label)
+	smash_actor_scale_spin = SpinBox.new()
+	smash_actor_scale_spin.min_value = 0.35
+	smash_actor_scale_spin.max_value = 3.0
+	smash_actor_scale_spin.step = 0.05
+	smash_actor_scale_spin.value = 1.0
+	smash_actor_scale_spin.custom_minimum_size = Vector2(130, 42)
+	smash_actor_scale_row.add_child(smash_actor_scale_spin)
+
+	var smash_hit_gap_row := HBoxContainer.new()
+	smash_hit_gap_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	content.add_child(smash_hit_gap_row)
+	var smash_hit_gap_label := Label.new()
+	smash_hit_gap_label.text = "SMASH HIT DISTANCE   "
+	smash_hit_gap_label.add_theme_font_size_override("font_size", 20)
+	smash_hit_gap_row.add_child(smash_hit_gap_label)
+	smash_hit_gap_spin = SpinBox.new()
+	smash_hit_gap_spin.min_value = 0.2
+	smash_hit_gap_spin.max_value = 8.0
+	smash_hit_gap_spin.step = 0.1
+	smash_hit_gap_spin.value = DEFAULT_SMASH_HIT_GAP
+	smash_hit_gap_spin.suffix = " m"
+	smash_hit_gap_spin.custom_minimum_size = Vector2(130, 42)
+	smash_hit_gap_row.add_child(smash_hit_gap_spin)
+
 	var companion_row := HBoxContainer.new()
 	companion_row.alignment = BoxContainer.ALIGNMENT_CENTER
 	content.add_child(companion_row)
@@ -1245,6 +1393,55 @@ func build_builder_ui() -> void:
 	custom_model_list.add_item("No custom 3D objects added")
 	custom_model_list.item_selected.connect(select_custom_model)
 	content.add_child(custom_model_list)
+
+	var round_models_title := Label.new()
+	round_models_title.text = "ROUND MODELS — INDIVIDUAL SIZE"
+	round_models_title.add_theme_font_size_override("font_size", 21)
+	content.add_child(round_models_title)
+	var round_models_box := HBoxContainer.new()
+	round_models_box.add_theme_constant_override("separation", 12)
+	content.add_child(round_models_box)
+	var round_models_left := VBoxContainer.new()
+	round_models_left.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	round_models_box.add_child(round_models_left)
+	round_model_list = ItemList.new()
+	round_model_list.custom_minimum_size = Vector2(470, 170)
+	round_model_list.item_selected.connect(select_round_model)
+	round_models_left.add_child(round_model_list)
+	var round_scale_row := HBoxContainer.new()
+	round_scale_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	round_models_left.add_child(round_scale_row)
+	var round_scale_label := Label.new()
+	round_scale_label.text = "SELECTED MODEL SIZE   "
+	round_scale_row.add_child(round_scale_label)
+	round_model_scale_spin = SpinBox.new()
+	round_model_scale_spin.min_value = 0.1
+	round_model_scale_spin.max_value = 5.0
+	round_model_scale_spin.step = 0.05
+	round_model_scale_spin.value = 1.0
+	round_model_scale_spin.custom_minimum_size = Vector2(120, 42)
+	round_model_scale_spin.value_changed.connect(update_selected_round_model_scale)
+	round_scale_row.add_child(round_model_scale_spin)
+	var preview_container := SubViewportContainer.new()
+	preview_container.custom_minimum_size = Vector2(250, 210)
+	preview_container.stretch = true
+	round_models_box.add_child(preview_container)
+	round_preview_viewport = SubViewport.new()
+	round_preview_viewport.size = Vector2i(500, 420)
+	round_preview_viewport.own_world_3d = true
+	round_preview_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	round_preview_viewport.transparent_bg = false
+	preview_container.add_child(round_preview_viewport)
+	round_preview_root = Node3D.new()
+	round_preview_viewport.add_child(round_preview_root)
+	round_preview_camera = Camera3D.new()
+	round_preview_camera.position = Vector3(0, 1.4, 5.0)
+	round_preview_camera.current = true
+	round_preview_viewport.add_child(round_preview_camera)
+	var preview_light := DirectionalLight3D.new()
+	preview_light.rotation_degrees = Vector3(-35, -25, 0)
+	preview_light.light_energy = 1.4
+	round_preview_viewport.add_child(preview_light)
 	model_file_dialog = FileDialog.new()
 	model_file_dialog.access = FileDialog.ACCESS_FILESYSTEM
 	model_file_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILES
@@ -1259,12 +1456,22 @@ func build_builder_ui() -> void:
 	note.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	note.add_theme_color_override("font_color", Color("a8b7d8"))
 	content.add_child(note)
+	var fullscreen_button := Button.new()
+	fullscreen_button.text = "FULLSCREEN PLAY — FOR RECORDING"
+	fullscreen_button.custom_minimum_size = Vector2(0, 58)
+	fullscreen_button.add_theme_font_size_override("font_size", 22)
+	fullscreen_button.pressed.connect(start_fullscreen_round)
+	content.add_child(fullscreen_button)
 	var play_button := Button.new()
 	play_button.text = "BUILD & PLAY"
 	play_button.custom_minimum_size = Vector2(0, 58)
 	play_button.add_theme_font_size_override("font_size", 24)
 	play_button.pressed.connect(apply_builder_settings)
 	content.add_child(play_button)
+
+func start_fullscreen_round() -> void:
+	apply_builder_settings()
+	DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN)
 
 func create_round_selector(parent: VBoxContainer, title_text: String, target: Dictionary, defaults: Array[String]) -> void:
 	var title := Label.new()
@@ -1293,9 +1500,101 @@ func selected_actions(checks: Dictionary) -> Array[String]:
 		selected.append("JUMP")
 	return selected
 
+func on_round_content_selected(index: int) -> void:
+	active_round = str(round_option.get_item_metadata(index))
+	load_obstacle_models()
+	refresh_round_model_list()
+
+func round_model_settings_path() -> String:
+	return "res://раунды/%s/model_settings.cfg" % active_round
+
+func load_round_model_scales() -> void:
+	round_model_scales.clear()
+	var config := ConfigFile.new()
+	if config.load(round_model_settings_path()) != OK:
+		return
+	for key in config.get_section_keys("scales"):
+		round_model_scales[key] = float(config.get_value("scales", key, 1.0))
+
+func save_round_model_scales() -> void:
+	var config := ConfigFile.new()
+	for key in round_model_scales:
+		config.set_value("scales", key, float(round_model_scales[key]))
+	var error := config.save(round_model_settings_path())
+	if error != OK:
+		push_warning("Could not save round model sizes: %s" % error_string(error))
+
+func refresh_round_model_list() -> void:
+	if not round_model_list:
+		return
+	round_model_list.clear()
+	round_model_entries.clear()
+	for action in ["JUMP", "DUCK", "LEFT", "RIGHT", "SMASH"]:
+		for prototype in obstacle_model_prototypes.get(action, []):
+			var key := str(prototype.get_meta("round_model_key", ""))
+			round_model_entries.append({"action": action, "prototype": prototype, "key": key})
+			round_model_list.add_item("[%s]  %s   × %.2f" % [action, key.get_file(), float(round_model_scales.get(key, 1.0))])
+	if round_model_entries.is_empty():
+		round_model_list.add_item("No GLB/GLTF models in %s" % active_round)
+		clear_round_model_preview()
+		return
+	round_model_list.select(0)
+	select_round_model(0)
+
+func select_round_model(index: int) -> void:
+	if index < 0 or index >= round_model_entries.size():
+		return
+	var entry := round_model_entries[index]
+	var prototype := entry.get("prototype") as Node3D
+	if not is_instance_valid(prototype):
+		refresh_round_model_list()
+		return
+	round_model_scale_spin.set_value_no_signal(float(round_model_scales.get(entry.key, 1.0)))
+	show_round_model_preview(prototype, float(round_model_scales.get(entry.key, 1.0)))
+
+func update_selected_round_model_scale(value: float) -> void:
+	var selected := round_model_list.get_selected_items()
+	if selected.is_empty() or selected[0] >= round_model_entries.size():
+		return
+	var index := selected[0]
+	var entry := round_model_entries[index]
+	var prototype := entry.get("prototype") as Node3D
+	if not is_instance_valid(prototype):
+		refresh_round_model_list()
+		return
+	round_model_scales[entry.key] = value
+	round_model_list.set_item_text(index, "[%s]  %s   × %.2f" % [entry.action, str(entry.key).get_file(), value])
+	save_round_model_scales()
+	show_round_model_preview(prototype, value)
+
+func clear_round_model_preview() -> void:
+	if not round_preview_root:
+		return
+	for child in round_preview_root.get_children():
+		child.queue_free()
+
+func show_round_model_preview(prototype: Node3D, individual_scale: float) -> void:
+	clear_round_model_preview()
+	if not is_instance_valid(prototype):
+		return
+	var visual := prototype.duplicate() as Node3D
+	visual.visible = true
+	round_preview_root.add_child(visual)
+	var bounds := calculate_model_bounds(visual)
+	var fit_scale := 2.6 / maxf(maxf(bounds.size.x, bounds.size.y), maxf(bounds.size.z, 0.001))
+	visual.scale = Vector3.ONE * fit_scale * individual_scale
+	visual.position = -bounds.get_center() * visual.scale
+	round_preview_camera.look_at(Vector3.ZERO, Vector3.UP)
+
 func apply_builder_settings() -> void:
 	video_duration = duration_spin.value
 	companion_size = companion_scale_spin.value
+	if round_option and round_option.item_count > 0:
+		active_round = str(round_option.get_item_metadata(round_option.selected))
+	load_obstacle_models()
+	refresh_round_model_list()
+	load_surface_textures()
+	load_background_panorama()
 	active_theme = theme_option.get_item_text(theme_option.selected)
 	active_layout = layout_option.get_item_text(layout_option.selected)
 	apply_theme_environment()
@@ -1362,6 +1661,8 @@ func _process(delta: float) -> void:
 
 	if smash_sequence_active:
 		update_smash_sequence(delta)
+		if smash_sequence_active and smash_event_has_actor(active_smash_event):
+			distance = minf(distance + speed * delta, course_length)
 	elif countdown > 0.0:
 		countdown -= delta
 		action_label.text = str(maxi(1, ceili(countdown)))
@@ -1411,8 +1712,16 @@ func _process(delta: float) -> void:
 	distance_label.text = "%d / %d M" % [int(distance), int(course_length)]
 	if not finished and countdown <= 0.0:
 		update_action_hint()
+	update_smash_actors()
+	update_image_panels()
 	update_feedback(delta)
 	update_companion(delta)
+
+func update_image_panels() -> void:
+	for panel_event in image_panel_events:
+		if not bool(panel_event.triggered) and distance >= float(panel_event.distance):
+			panel_event.triggered = true
+			show_result(true)
 
 func update_action_hint() -> void:
 	action_label.text = ""
@@ -1423,6 +1732,18 @@ func update_action_hint() -> void:
 		if gap > 0.0 and gap < 18.0:
 			action_label.text = str(event.action)
 			set_action_icon(str(event.action))
+
+func update_smash_actors() -> void:
+	# Static models still feel alive: as their event approaches they move a few
+	# metres towards the runner. Animated variants can replace this fallback later.
+	for event in events:
+		if str(event.action) != "SMASH" or not event.has("targets"):
+			continue
+		var approach := clampf((18.0 - (float(event.distance) - distance)) / 18.0, 0.0, 1.0)
+		approach = approach * approach * (3.0 - 2.0 * approach)
+		for target in event.targets:
+			if is_instance_valid(target) and target.has_meta("smash_actor") and not target.has_meta("smash_falling"):
+				target.global_position.z = float(target.get_meta("spawn_z")) + approach * 3.2
 
 func set_action_icon(action: String) -> void:
 	match action:
@@ -1456,7 +1777,7 @@ func evaluate_event() -> void:
 	if event_index >= events.size():
 		return
 	var event := events[event_index]
-	if str(event.action) == "SMASH" and distance >= float(event.distance) - 3.0:
+	if str(event.action) == "SMASH" and smash_event_is_in_hit_range(event):
 		begin_smash_sequence(event)
 	elif distance >= float(event.distance):
 		if str(event.action) != "SMASH":
@@ -1464,12 +1785,25 @@ func evaluate_event() -> void:
 			event_index += 1
 			action_armed = false
 
+func smash_event_is_in_hit_range(event: Dictionary) -> bool:
+	# Character hits use the model's actual rear surface, not its origin. This
+	# keeps every selected size at arm's length without letting the camera clip in.
+	if smash_event_has_actor(event):
+		for target in event.targets:
+			if is_instance_valid(target) and target.has_meta("smash_actor"):
+				var bounds := calculate_world_mesh_bounds(target)
+				var surface_gap := camera_rig.global_position.z - bounds.end.z
+				var hit_gap := smash_hit_gap_spin.value if smash_hit_gap_spin else DEFAULT_SMASH_HIT_GAP
+				return surface_gap <= hit_gap
+	# The procedural wall keeps its original close-range timing.
+	return distance >= float(event.distance) - 3.0
+
 func begin_smash_sequence(event: Dictionary) -> void:
 	smash_sequence_active = true
 	smash_sequence_timer = 0.0
 	smash_sequence_stage = 0
 	active_smash_event = event
-	action_label.text = "SMASH 2X"
+	action_label.text = "SMASH" if smash_event_has_actor(event) else "SMASH 2X"
 	set_action_icon("SMASH")
 	action_label.pivot_offset = action_label.size * 0.5
 	action_icon.pivot_offset = action_icon.size * 0.5
@@ -1479,21 +1813,36 @@ func update_smash_sequence(delta: float) -> void:
 	var pulse := 1.0 + sin(smash_sequence_timer * TAU * 2.2) * 0.085
 	action_label.scale = Vector2.ONE * pulse
 	action_icon.scale = Vector2.ONE * pulse
-	if smash_sequence_stage == 0 and smash_sequence_timer >= 0.55:
+	var first_hit_time := 0.08 if smash_event_has_actor(active_smash_event) else 0.55
+	if smash_sequence_stage == 0 and smash_sequence_timer >= first_hit_time:
 		smash_sequence_stage = 1
-		apply_cracked_smash_texture(active_smash_event)
-		play_sfx("SMASH")
+		if smash_event_has_actor(active_smash_event):
+			complete_smash_sequence()
+		else:
+			apply_cracked_smash_texture(active_smash_event)
+			play_sfx("SMASH")
 	elif smash_sequence_stage == 1 and smash_sequence_timer >= 1.35:
 		smash_sequence_stage = 2
-		break_smash_targets(active_smash_event)
-		play_sfx("SMASH")
-		show_result(true)
-		event_index += 1
-		action_armed = false
-		smash_sequence_active = false
-		active_smash_event = {}
-		action_label.scale = Vector2.ONE
-		action_icon.scale = Vector2.ONE
+		complete_smash_sequence()
+
+func smash_event_has_actor(event: Dictionary) -> bool:
+	if not event.has("targets"):
+		return false
+	for target in event.targets:
+		if is_instance_valid(target) and target.has_meta("smash_actor"):
+			return true
+	return false
+
+func complete_smash_sequence() -> void:
+	break_smash_targets(active_smash_event)
+	play_sfx("SMASH")
+	show_result(true)
+	event_index += 1
+	action_armed = false
+	smash_sequence_active = false
+	active_smash_event = {}
+	action_label.scale = Vector2.ONE
+	action_icon.scale = Vector2.ONE
 
 func apply_cracked_smash_texture(event: Dictionary) -> void:
 	if not event.has("targets"):
@@ -1507,7 +1856,22 @@ func break_smash_targets(event: Dictionary) -> void:
 		return
 	for target in event.targets:
 		if is_instance_valid(target):
-			target.queue_free()
+			if target.has_meta("smash_actor"):
+				fall_smash_actor(target)
+			else:
+				target.queue_free()
+
+func fall_smash_actor(target: Node3D) -> void:
+	target.set_meta("smash_falling", true)
+	var tween := target.create_tween()
+	tween.set_parallel(true)
+	tween.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	# Tip the model away from the player and let it drop instead of disappearing.
+	tween.tween_property(target, "rotation:x", target.rotation.x - PI * 0.5, 0.65)
+	tween.tween_property(target, "position:y", target.position.y - 1.25, 0.65)
+	tween.tween_property(target, "position:z", target.position.z - 1.4, 0.65)
+	tween.chain().tween_interval(0.35)
+	tween.chain().tween_callback(target.queue_free)
 
 func show_result(success: bool) -> void:
 	# Пропуск не наказывается: для фитнес-ролика оставляем только
@@ -1523,7 +1887,9 @@ func show_result(success: bool) -> void:
 func play_sfx(kind: String, pan: float = 0.0) -> void:
 	var player := AudioStreamPlayer.new()
 	player.name = "SFX_%s" % kind
-	player.stream = synthesize_sfx(kind)
+	player.stream = load_project_sfx(kind)
+	if not player.stream:
+		player.stream = synthesize_sfx(kind)
 	player.volume_db = -7.0
 	# Параметр сохраняем для будущего AudioEffectPanner. У обычного
 	# AudioStreamPlayer в Godot 4.7 свойства balance нет.
@@ -1531,6 +1897,18 @@ func play_sfx(kind: String, pan: float = 0.0) -> void:
 	add_child(player)
 	player.finished.connect(player.queue_free)
 	player.play()
+
+func load_project_sfx(kind: String) -> AudioStream:
+	var folder_path := "res://assets/sounds/%s" % kind.to_lower()
+	var audio_files: Array[String] = []
+	for file_name in DirAccess.get_files_at(folder_path):
+		if file_name.get_extension().to_lower() in ["wav", "ogg", "mp3"]:
+			audio_files.append(file_name)
+	if audio_files.is_empty():
+		return null
+	audio_files.sort()
+	var stream := load(folder_path.path_join(audio_files.pick_random()))
+	return stream as AudioStream
 
 func synthesize_sfx(kind: String) -> AudioStreamWAV:
 	# Временные оригинальные эффекты генерируются математически и не

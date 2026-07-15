@@ -1,8 +1,13 @@
 .godot/
+.godot-user/
+.godot-user-local/
 *.tmp
 *.log
 .DS_Store
 Thumbs.db
+
+# Captured round videos are local render outputs, not project source assets.
+/раунды/**/*.avi
 
 # Local source videos and visual references must never be published.
 /референс/
