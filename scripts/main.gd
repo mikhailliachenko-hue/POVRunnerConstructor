@@ -1,5 +1,7 @@
 extends Node3D
 
+const ImportedWorldManagerScript = preload("res://scripts/imported_world_manager.gd")
+
 const LANE_X: Array[float] = [-3.2, 0.0, 3.2]
 const DODGE_DURATION := 1.8
 const DUCK_DURATION := 1.25
@@ -91,9 +93,23 @@ var companion_model_index := -1
 var companion_run_time := 0.0
 var companion_visual_base_y := 0.0
 var companion_size := 1.0
+var imported_world_manager: ImportedWorldManager
+var imported_world_check: CheckButton
+var imported_world_option: OptionButton
+var world_auto_fit_check: CheckButton
+var world_scale_spin: SpinBox
+var world_rotation_spin: SpinBox
+var world_offset_x_spin: SpinBox
+var world_offset_y_spin: SpinBox
+var world_offset_z_spin: SpinBox
+var world_floor_spin: SpinBox
+var world_corridor_spin: SpinBox
+var world_diagnostics_label: Label
+var imported_worlds: Array[Dictionary] = []
 const SURFACE_TILE_SIZE := 1.0
 
 func _ready() -> void:
+	imported_world_manager = ImportedWorldManagerScript.new()
 	build_world()
 	build_ui()
 	build_builder_ui()
@@ -151,6 +167,10 @@ func build_world() -> void:
 func load_background_panorama() -> void:
 	var folder_path := "res://раунды/%s/textures/background" % active_round
 	var image_files: Array[String] = []
+	if not DirAccess.dir_exists_absolute(folder_path):
+		world_environment.background_mode = Environment.BG_COLOR
+		world_environment.sky = null
+		return
 	for file_name in DirAccess.get_files_at(folder_path):
 		if file_name.get_extension().to_lower() in ["png", "jpg", "jpeg", "webp", "hdr", "exr"]:
 			image_files.append(file_name)
@@ -175,6 +195,8 @@ func load_surface_textures() -> void:
 	for slot in ["road", "ground"]:
 		var folder_path := "res://раунды/%s/textures/%s" % [active_round, slot]
 		var image_files: Array[String] = []
+		if not DirAccess.dir_exists_absolute(folder_path):
+			continue
 		for file_name in DirAccess.get_files_at(folder_path):
 			if file_name.get_extension().to_lower() in ["png", "jpg", "jpeg", "webp"]:
 				image_files.append(file_name)
@@ -190,10 +212,19 @@ func build_course() -> void:
 		child.queue_free()
 	image_panel_events.clear()
 	obstacle_model_next_indices.clear()
-	var road_color := theme_color("road")
-	create_box("Road", Vector3(11, 0.25, course_length + 20), Vector3(0, -0.25, -course_length * 0.5 + 5), road_color)
-	for lane_mark in [-1.6, 1.6]:
-		create_box("LaneMark", Vector3(0.10, 0.025, course_length), Vector3(lane_mark, 0.02, -course_length * 0.5 + 5), Color(1, 1, 1, 0.65))
+	var road_color := Color("596b45") if imported_world_enabled() else theme_color("road")
+	var end_reference_round := active_round == "round_02"
+	var road_width := 10.4 if imported_world_enabled() else (15.0 if end_reference_round else 11.0)
+	var road_thickness := 0.12 if imported_world_enabled() else 0.25
+	create_box("Road", Vector3(road_width, road_thickness, course_length + 20), Vector3(0, -road_thickness, -course_length * 0.5 + 5), road_color)
+	if imported_world_enabled():
+		# Subtle inset strips read as a route without turning the road into a bright
+		# unrelated sheet that visually hides the imported location.
+		for lane_mark in [-1.6, 1.6]:
+			create_box("WorldRouteMark", Vector3(0.055, 0.018, course_length), Vector3(lane_mark, 0.015, -course_length * 0.5 + 5), Color("9aaa72"))
+	elif not end_reference_round:
+		for lane_mark in [-1.6, 1.6]:
+			create_box("LaneMark", Vector3(0.10, 0.025, course_length), Vector3(lane_mark, 0.02, -course_length * 0.5 + 5), Color(1, 1, 1, 0.65))
 
 	build_theme_environment()
 
@@ -220,12 +251,15 @@ func build_course() -> void:
 
 	create_random_image_panels()
 
-	var finish_z := start_position.z - course_length
-	create_box("FinishTop", Vector3(11, 0.55, 0.55), Vector3(0, 5.7, finish_z), Color.WHITE)
-	create_box("FinishLeft", Vector3(0.55, 6, 0.55), Vector3(-5.2, 2.8, finish_z), Color.WHITE)
-	create_box("FinishRight", Vector3(0.55, 6, 0.55), Vector3(5.2, 2.8, finish_z), Color.WHITE)
+	if not end_reference_round:
+		var finish_z := start_position.z - course_length
+		create_box("FinishTop", Vector3(11, 0.55, 0.55), Vector3(0, 5.7, finish_z), Color.WHITE)
+		create_box("FinishLeft", Vector3(0.55, 6, 0.55), Vector3(-5.2, 2.8, finish_z), Color.WHITE)
+		create_box("FinishRight", Vector3(0.55, 6, 0.55), Vector3(5.2, 2.8, finish_z), Color.WHITE)
 
 func create_random_image_panels() -> void:
+	if round_is_self_contained():
+		return
 	if not image_panels_check or not image_panels_check.button_pressed:
 		return
 	var folder_path := "res://assets/image_panels"
@@ -284,14 +318,260 @@ func theme_color(slot: String) -> Color:
 
 func build_theme_environment() -> void:
 	occupied_environment_spots.clear()
+	if imported_world_enabled():
+		spawn_imported_world()
+		return
+	if round_is_self_contained():
+		if spawn_round_map():
+			return
+		build_round_owned_base_environment()
+		spawn_round_environment_objects()
+		spawn_round_landscape_objects()
+		spawn_round_hero_objects()
+		return
 	build_custom_base_environment()
 	build_category_placeholders()
 	spawn_custom_environment_objects()
+	spawn_round_environment_objects()
 	if active_layout == "Closed Corridor":
 		build_closed_layout_shell()
 		build_closed_world_layers()
 	else:
 		build_open_world_layers()
+
+func round_is_self_contained() -> bool:
+	var config := ConfigFile.new()
+	var settings_path := "res://раунды/%s/round_settings.cfg" % active_round
+	if config.load(settings_path) != OK:
+		return false
+	return bool(config.get_value("environment", "self_contained", false))
+
+func imported_world_enabled() -> bool:
+	return active_round == "round_02" and imported_world_check and imported_world_check.button_pressed and not imported_worlds.is_empty()
+
+func selected_imported_world() -> Dictionary:
+	if not imported_world_option or imported_world_option.selected < 0 or imported_world_option.selected >= imported_worlds.size():
+		return {}
+	return imported_worlds[imported_world_option.selected]
+
+func spawn_imported_world() -> void:
+	var descriptor := selected_imported_world()
+	if descriptor.is_empty():
+		push_warning("IMPORTED WORLD включён, но подходящий GLB/GLTF не найден")
+		return
+	var report := imported_world_manager.load_world(course_root, descriptor, course_length, {
+		"auto_fit": world_auto_fit_check.button_pressed,
+		"scale_multiplier": world_scale_spin.value,
+		"rotation_y_degrees": world_rotation_spin.value,
+		"route_offset": Vector3(world_offset_x_spin.value, world_offset_y_spin.value, world_offset_z_spin.value),
+		"floor_height": world_floor_spin.value,
+		"safe_corridor_width": world_corridor_spin.value,
+	})
+	update_world_diagnostics(report)
+	if not bool(report.get("valid", false)):
+		push_warning(str(report.get("error", "Не удалось загрузить импортированный мир")))
+		return
+	print("IMPORTED WORLD: %s | raw=%s | final=%s | axis=%s | scale=%.4f | meshes=%d | vertices=%d | carved=%d" % [
+		str(report.id), str(report.raw_bounds), str(report.bounds), str(report.axis), float(report.uniform_scale),
+		int(report.mesh_count), int(report.vertex_count), int(report.get("removed_triangles", 0))])
+
+func update_world_diagnostics(report: Dictionary) -> void:
+	if not world_diagnostics_label:
+		return
+	if not bool(report.get("valid", false)):
+		world_diagnostics_label.text = "WORLD STATUS: %s" % str(report.get("error", "not loaded"))
+		world_diagnostics_label.add_theme_color_override("font_color", Color("ff7b7b"))
+		return
+	var license_data: Dictionary = report.get("license", {})
+	var warning_text := "OK" if report.get("warnings", []).is_empty() else " / ".join(report.warnings)
+	world_diagnostics_label.text = "SIZE %s | SCALE %.3f | AXIS %s | ROUTE %.1f m\nSTATUS: %s | LICENSE: %s" % [
+		str(report.bounds.size), float(report.uniform_scale), str(report.axis), float(report.route_available),
+		warning_text, str(license_data.get("license", "not specified"))]
+	world_diagnostics_label.add_theme_color_override("font_color", Color("91e6ae") if report.get("warnings", []).is_empty() else Color("ffd36a"))
+
+func spawn_round_map() -> bool:
+	var config := ConfigFile.new()
+	var settings_path := "res://раунды/%s/round_settings.cfg" % active_round
+	if config.load(settings_path) != OK:
+		return false
+	var map_path := str(config.get_value("map", "path", ""))
+	if map_path.is_empty():
+		return false
+	var map_scene := load(map_path) as PackedScene
+	if not map_scene:
+		push_error("Could not load round map: %s" % map_path)
+		return false
+	var round_map := map_scene.instantiate() as Node3D
+	if not round_map:
+		push_error("Could not generate round map scene: %s" % map_path)
+		return false
+	round_map.name = "RoundMap"
+	round_map.scale = Vector3.ONE * float(config.get_value("map", "scale", 1.0))
+	round_map.position = Vector3(
+		float(config.get_value("map", "position_x", 0.0)),
+		float(config.get_value("map", "position_y", 0.0)),
+		float(config.get_value("map", "position_z", 0.0))
+	)
+	round_map.rotation_degrees.y = float(config.get_value("map", "rotation_y", 0.0))
+	course_root.add_child(round_map)
+	return true
+
+func build_round_owned_base_environment() -> void:
+	# Only neutral structural geometry is generated here. Its appearance comes
+	# from textures owned by the selected round; no global models are involved.
+	if active_round in ["round_02", "round_03", "round_04"]:
+		create_box("EndStoneGround", Vector3(64.0, 0.4, course_length + 20.0), Vector3(0, -0.45, -course_length * 0.5 + 5.0), Color("55583b"))
+		if active_round == "round_02":
+			var shelf_z := -18.0
+			var shelf_index := 0
+			while shelf_z > -course_length:
+				var side := -1.0 if shelf_index % 2 == 0 else 1.0
+				create_box("EndStoneGround", Vector3(18.0 + float(shelf_index % 3) * 4.0, 0.65, 16.0), Vector3(side * 19.0, -0.18 + float(shelf_index % 2) * 0.3, shelf_z), Color("8f9163"))
+				shelf_z -= 28.0
+				shelf_index += 1
+			return
+		for side in [-1.0, 1.0]:
+			var void_channel := create_box("RoundVoidChannel", Vector3(3.4, 0.12, course_length + 16.0), Vector3(side * 7.15, -0.16, -course_length * 0.5 + 5.0), Color("080411"))
+			var void_material := void_channel.material_override as StandardMaterial3D
+			void_material.emission_enabled = true
+			void_material.emission = Color("100d18")
+			void_material.emission_energy_multiplier = 0.12
+		var light_z := 0.0
+		while light_z > -course_length:
+			var end_light := OmniLight3D.new()
+			end_light.name = "RoundEndLight"
+			end_light.position = Vector3(0.0, 2.2, light_z)
+			end_light.light_color = Color("80758f")
+			end_light.light_energy = 0.32
+			end_light.omni_range = 12.0
+			end_light.shadow_enabled = false
+			course_root.add_child(end_light)
+			light_z -= 28.0
+		return
+	create_box("InfernalGround", Vector3(64.0, 0.4, course_length + 20.0), Vector3(0, -0.45, -course_length * 0.5 + 5.0), Color("241519"))
+	# Recessed lava channels frame the track without entering the playable lanes.
+	for side in [-1.0, 1.0]:
+		var lava := create_box("RoundLavaChannel", Vector3(3.4, 0.12, course_length + 16.0), Vector3(side * 7.15, -0.16, -course_length * 0.5 + 5.0), Color("ff3b08"))
+		var material := lava.material_override as StandardMaterial3D
+		material.emission_enabled = true
+		material.emission = Color("ff2400")
+		material.emission_energy_multiplier = 1.8
+	# Pool lights make the emissive channels affect nearby masonry instead of
+	# reading as flat orange strips.
+	var light_z := 0.0
+	while light_z > -course_length:
+		var lava_light := OmniLight3D.new()
+		lava_light.name = "RoundLavaLight"
+		lava_light.position = Vector3(0.0, 1.4, light_z)
+		lava_light.light_color = Color("ff4b22")
+		lava_light.light_energy = 1.15
+		lava_light.omni_range = 11.0
+		lava_light.shadow_enabled = false
+		course_root.add_child(lava_light)
+		light_z -= 28.0
+
+func spawn_round_landscape_objects() -> void:
+	var folder_path := "res://раунды/%s/environment" % active_round
+	if not DirAccess.dir_exists_absolute(folder_path):
+		return
+	var model_files: Array[String] = []
+	for file_name in DirAccess.get_files_at(folder_path):
+		if file_name.get_extension().to_lower() in ["glb", "gltf"]:
+			model_files.append(file_name)
+	model_files.sort()
+	if model_files.is_empty():
+		return
+	var spacing := 55.0 if active_round == "round_02" else 24.0
+	var landscape_index := 0
+	var z := -10.0
+	while z > -course_length - 12.0:
+		for side in [-1.0, 1.0]:
+			var file_name := model_files[(landscape_index + (0 if side < 0 else 2)) % model_files.size()]
+			var document := GLTFDocument.new()
+			var state := GLTFState.new()
+			var resource_path := folder_path.path_join(file_name)
+			if document.append_from_file(ProjectSettings.globalize_path(resource_path), state) != OK:
+				continue
+			var landscape := document.generate_scene(state) as Node3D
+			if not landscape:
+				continue
+			landscape.name = "RoundLandscape_%d" % landscape_index
+			course_root.add_child(landscape)
+			var bounds := calculate_model_bounds(landscape)
+			var target_height := 10.0 + float(landscape_index % 3) * 2.5
+			var fit_scale := target_height / maxf(bounds.size.y, 0.001)
+			landscape.scale = Vector3.ONE * fit_scale
+			landscape.position = Vector3(side * (18.0 + float(landscape_index % 2) * 3.5), 0.0, z - (6.0 if side > 0 else 0.0))
+			var world_bounds := calculate_world_mesh_bounds(landscape)
+			landscape.global_position.y -= world_bounds.position.y
+			landscape_index += 1
+		z -= spacing
+
+func spawn_round_hero_objects() -> void:
+	if active_round not in ["round_02", "round_04"]:
+		return
+	var placements := {
+		"ender_dragon.glb": {"position": Vector3(0, 15.5, -course_length * 0.42), "height": 8.0, "rotation": -12.0},
+		"exit_portal.glb": {"position": Vector3(-15.5, 0, -course_length * 0.55), "height": 4.2, "rotation": 18.0},
+		"end_city_complex.glb": {"position": Vector3(21.0, 0, -course_length * 0.78), "height": 18.0, "rotation": -18.0},
+	}
+	var folder_path := "res://раунды/%s/hero" % active_round
+	for file_name in placements:
+		var resource_path := folder_path.path_join(file_name)
+		var document := GLTFDocument.new()
+		var state := GLTFState.new()
+		if document.append_from_file(ProjectSettings.globalize_path(resource_path), state) != OK:
+			continue
+		var hero := document.generate_scene(state) as Node3D
+		if not hero:
+			continue
+		course_root.add_child(hero)
+		hero.name = "RoundHero_%s" % file_name.get_basename()
+		var placement: Dictionary = placements[file_name]
+		var bounds := calculate_model_bounds(hero)
+		hero.scale = Vector3.ONE * (float(placement.height) / maxf(bounds.size.y, 0.001))
+		hero.position = placement.position
+		hero.rotation_degrees.y = float(placement.rotation)
+		if file_name != "ender_dragon.glb":
+			var world_bounds := calculate_world_mesh_bounds(hero)
+			hero.global_position.y -= world_bounds.position.y
+
+func spawn_round_environment_objects() -> void:
+	# Optional scenery owned by a round. Existing rounds without a decor folder
+	# keep their established generated environment unchanged.
+	var folder_path := "res://раунды/%s/decor" % active_round
+	if not DirAccess.dir_exists_absolute(folder_path):
+		return
+	var model_files: Array[String] = []
+	for file_name in DirAccess.get_files_at(folder_path):
+		if file_name.get_extension().to_lower() in ["glb", "gltf"]:
+			model_files.append(file_name)
+	model_files.sort()
+	if model_files.is_empty():
+		return
+	var spacing := 24.0 if active_round == "round_02" else lerpf(18.0, 8.0, map_fullness())
+	var decoration_index := 0
+	var z := -6.0
+	while z > -course_length:
+		var file_name := model_files[decoration_index % model_files.size()]
+		var document := GLTFDocument.new()
+		var state := GLTFState.new()
+		var resource_path := folder_path.path_join(file_name)
+		if document.append_from_file(ProjectSettings.globalize_path(resource_path), state) == OK:
+			var decoration := document.generate_scene(state) as Node3D
+			if decoration:
+				decoration.name = "RoundDecor_%d" % decoration_index
+				course_root.add_child(decoration)
+				var bounds := calculate_model_bounds(decoration)
+				var target_height := 2.4 + float(decoration_index % 3) * 0.65
+				var fit_scale := target_height / maxf(bounds.size.y, 0.001)
+				decoration.scale = Vector3.ONE * fit_scale
+				var side := -1.0 if decoration_index % 2 == 0 else 1.0
+				decoration.position = Vector3(side * (7.3 + float(decoration_index % 2) * 1.2), 0.0, z)
+				var world_bounds := calculate_world_mesh_bounds(decoration)
+				decoration.global_position.y -= world_bounds.position.y
+		decoration_index += 1
+		z -= spacing
 
 func build_open_world_layers() -> void:
 	# Three readable depth bands: near gameplay framing, mid-sized architecture,
@@ -601,6 +881,8 @@ func load_obstacle_models() -> void:
 	for action in ["JUMP", "DUCK", "LEFT", "RIGHT", "SMASH"]:
 		var folder_path := "res://раунды/%s/%s" % [active_round, action.to_lower()]
 		var model_files: Array[String] = []
+		if not DirAccess.dir_exists_absolute(folder_path):
+			continue
 		for file_name in DirAccess.get_files_at(folder_path):
 			if file_name.get_extension().to_lower() in ["glb", "gltf"]:
 				model_files.append(file_name)
@@ -1215,6 +1497,8 @@ func build_builder_ui() -> void:
 	round_option.item_selected.connect(on_round_content_selected)
 	round_row.add_child(round_option)
 
+	build_imported_world_controls(content)
+
 	var image_panels_row := HBoxContainer.new()
 	image_panels_row.alignment = BoxContainer.ALIGNMENT_CENTER
 	content.add_child(image_panels_row)
@@ -1502,8 +1786,106 @@ func selected_actions(checks: Dictionary) -> Array[String]:
 
 func on_round_content_selected(index: int) -> void:
 	active_round = str(round_option.get_item_metadata(index))
+	if imported_world_check:
+		imported_world_check.button_pressed = active_round == "round_02"
 	load_obstacle_models()
 	refresh_round_model_list()
+
+func build_imported_world_controls(content: VBoxContainer) -> void:
+	imported_worlds = imported_world_manager.discover_worlds()
+	var title := Label.new()
+	title.text = "IMPORTED WORLD — ROUND 2"
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.add_theme_font_size_override("font_size", 22)
+	title.add_theme_color_override("font_color", Color("74d9ff"))
+	content.add_child(title)
+	var help := Label.new()
+	help.text = "Положите GLB/GLTF в папку мира. Игра подберёт равномерный масштаб и расположит трассу внутри сцены."
+	help.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	help.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	content.add_child(help)
+	var select_row := HBoxContainer.new()
+	select_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	content.add_child(select_row)
+	imported_world_check = CheckButton.new()
+	imported_world_check.text = "IMPORTED WORLD"
+	imported_world_check.button_pressed = active_round == "round_02"
+	select_row.add_child(imported_world_check)
+	imported_world_option = OptionButton.new()
+	imported_world_option.custom_minimum_size = Vector2(250, 42)
+	for descriptor in imported_worlds:
+		imported_world_option.add_item(str(descriptor.id).replace("_", " ").capitalize())
+	if imported_worlds.is_empty():
+		imported_world_option.add_item("No worlds found")
+		imported_world_option.disabled = true
+		imported_world_check.disabled = true
+	select_row.add_child(imported_world_option)
+	world_auto_fit_check = CheckButton.new()
+	world_auto_fit_check.text = "AUTO FIT"
+	world_auto_fit_check.button_pressed = true
+	select_row.add_child(world_auto_fit_check)
+	var scale_row := HBoxContainer.new()
+	scale_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	content.add_child(scale_row)
+	scale_row.add_child(_world_label("WORLD SCALE"))
+	world_scale_spin = _world_spin(0.05, 10.0, 0.05, 1.0)
+	scale_row.add_child(world_scale_spin)
+	scale_row.add_child(_world_label("ROTATION Y"))
+	world_rotation_spin = _world_spin(-180.0, 180.0, 1.0, 0.0)
+	world_rotation_spin.suffix = "°"
+	scale_row.add_child(world_rotation_spin)
+	scale_row.add_child(_world_label("FLOOR"))
+	world_floor_spin = _world_spin(-30.0, 30.0, 0.1, 0.0)
+	world_floor_spin.suffix = " m"
+	scale_row.add_child(world_floor_spin)
+	var offset_row := HBoxContainer.new()
+	offset_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	content.add_child(offset_row)
+	offset_row.add_child(_world_label("ROUTE OFFSET X/Y/Z"))
+	world_offset_x_spin = _world_spin(-100.0, 100.0, 0.25, 0.0)
+	world_offset_y_spin = _world_spin(-100.0, 100.0, 0.25, 0.0)
+	world_offset_z_spin = _world_spin(-100.0, 100.0, 0.25, 0.0)
+	offset_row.add_child(world_offset_x_spin)
+	offset_row.add_child(world_offset_y_spin)
+	offset_row.add_child(world_offset_z_spin)
+	offset_row.add_child(_world_label("SAFE WIDTH"))
+	world_corridor_spin = _world_spin(11.0, 50.0, 0.5, 14.0)
+	world_corridor_spin.suffix = " m"
+	offset_row.add_child(world_corridor_spin)
+	var reset_button := Button.new()
+	reset_button.text = "RESET WORLD SETTINGS"
+	reset_button.pressed.connect(reset_world_controls)
+	offset_row.add_child(reset_button)
+	world_diagnostics_label = Label.new()
+	world_diagnostics_label.text = "WORLD STATUS: ready for Round 2"
+	world_diagnostics_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	world_diagnostics_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	content.add_child(world_diagnostics_label)
+
+func _world_label(text: String) -> Label:
+	var label := Label.new()
+	label.text = text
+	return label
+
+func _world_spin(minimum: float, maximum: float, step_value: float, default_value: float) -> SpinBox:
+	var spin := SpinBox.new()
+	spin.min_value = minimum
+	spin.max_value = maximum
+	spin.step = step_value
+	spin.value = default_value
+	spin.custom_minimum_size = Vector2(90, 42)
+	return spin
+
+func reset_world_controls() -> void:
+	world_auto_fit_check.button_pressed = true
+	world_scale_spin.value = 1.0
+	world_rotation_spin.value = 0.0
+	world_offset_x_spin.value = 0.0
+	world_offset_y_spin.value = 0.0
+	world_offset_z_spin.value = 0.0
+	world_floor_spin.value = 0.0
+	world_corridor_spin.value = 14.0
+	world_diagnostics_label.text = "WORLD STATUS: automatic settings restored"
 
 func round_model_settings_path() -> String:
 	return "res://раунды/%s/model_settings.cfg" % active_round
@@ -1512,6 +1894,8 @@ func load_round_model_scales() -> void:
 	round_model_scales.clear()
 	var config := ConfigFile.new()
 	if config.load(round_model_settings_path()) != OK:
+		return
+	if not config.has_section("scales"):
 		return
 	for key in config.get_section_keys("scales"):
 		round_model_scales[key] = float(config.get_value("scales", key, 1.0))
@@ -1616,6 +2000,55 @@ func apply_builder_settings() -> void:
 	builder_overlay.visible = false
 
 func apply_theme_environment() -> void:
+	if round_is_self_contained():
+		if active_round == "round_04":
+			world_environment.background_color = Color("160303")
+			world_environment.ambient_light_color = Color("a83b25")
+			world_environment.ambient_light_energy = 0.46
+			world_environment.fog_enabled = true
+			world_environment.fog_light_color = Color("4a0906")
+			world_environment.fog_light_energy = 0.72
+			world_environment.fog_density = 0.0035
+			world_environment.fog_sky_affect = 0.55
+			world_environment.adjustment_brightness = 0.94
+			world_environment.adjustment_contrast = 1.12
+			world_environment.adjustment_saturation = 1.08
+			sun_light.light_color = Color("ff6a3d")
+			sun_light.light_energy = 0.82
+			sun_light.rotation_degrees = Vector3(-48, -28, 0)
+			return
+		if active_round in ["round_02", "round_03", "round_05"]:
+			world_environment.background_color = Color("05030b")
+			world_environment.ambient_light_color = Color("777284")
+			world_environment.ambient_light_energy = 0.31
+			world_environment.fog_enabled = true
+			world_environment.fog_light_color = Color("211b2e")
+			world_environment.fog_light_energy = 0.48
+			world_environment.fog_density = 0.0048
+			world_environment.fog_sky_affect = 0.68
+			world_environment.adjustment_brightness = 0.79
+			world_environment.adjustment_contrast = 1.16
+			world_environment.adjustment_saturation = 0.58
+			sun_light.light_color = Color("aaa7b6")
+			sun_light.light_energy = 0.62
+			sun_light.rotation_degrees = Vector3(-52, -28, 0)
+			return
+		world_environment.background_color = Color("120307")
+		world_environment.ambient_light_color = Color("b75848")
+		world_environment.ambient_light_energy = 0.40
+		world_environment.fog_enabled = true
+		world_environment.fog_light_color = Color("3b080b")
+		world_environment.fog_light_energy = 0.68
+		world_environment.fog_density = 0.006
+		world_environment.fog_sky_affect = 0.42
+		world_environment.adjustment_brightness = 1.04
+		world_environment.adjustment_contrast = 1.08
+		world_environment.adjustment_saturation = 1.08
+		sun_light.light_color = Color("ff7048")
+		sun_light.light_energy = 0.95
+		sun_light.rotation_degrees = Vector3(-48, -32, 0)
+		return
+	world_environment.fog_enabled = false
 	match active_theme:
 		"Candy":
 			world_environment.background_color = Color("55baf2")

@@ -1,6 +1,7 @@
 .godot/
 .godot-user/
 .godot-user-local/
+LocalLow/
 *.tmp
 *.log
 .DS_Store
