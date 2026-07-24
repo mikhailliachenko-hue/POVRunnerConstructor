@@ -9,6 +9,8 @@ const DUCK_DEPTH := 1.05
 const ACTION_WINDOW := 12.0
 const DEFAULT_SMASH_HIT_GAP := 1.8
 const DUCK_VISUAL_SINK := 0.6
+var background_video_overscan := 1.32
+var background_jump_shift_px := 82.0
 var speed := 12.0
 var course_length := 180.0
 var video_duration := 15.0
@@ -26,6 +28,8 @@ var ducking := false
 var duck_time := 0.0
 var duck_offset := 0.0
 var finished := false
+var gameplay_viewport_container: SubViewportContainer
+var gameplay_viewport: SubViewport
 var camera_rig: Node3D
 var camera: Camera3D
 var course_root: Node3D
@@ -106,6 +110,15 @@ var world_floor_spin: SpinBox
 var world_corridor_spin: SpinBox
 var world_diagnostics_label: Label
 var imported_worlds: Array[Dictionary] = []
+var background_video_layer: CanvasLayer
+var background_video_players: Array[VideoStreamPlayer] = []
+var background_video_paths: Array[String] = []
+var background_video_clip_indices: Array[int] = [-1, -1]
+var background_video_ready: Array[bool] = [false, false]
+var background_video_prime_tokens: Array[int] = [0, 0]
+var background_video_active_slot := 0
+var background_video_index := 0
+var background_video_started := false
 const SURFACE_TILE_SIZE := 1.0
 
 func _ready() -> void:
@@ -121,10 +134,25 @@ func _ready() -> void:
 	builder_overlay.visible = true
 	builder_active = true
 
+func build_gameplay_viewport() -> void:
+	gameplay_viewport_container = SubViewportContainer.new()
+	gameplay_viewport_container.name = "GameplayComposite"
+	gameplay_viewport_container.stretch = true
+	gameplay_viewport_container.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(gameplay_viewport_container)
+	gameplay_viewport = SubViewport.new()
+	gameplay_viewport.name = "GameplayViewport"
+	gameplay_viewport.size = Vector2i(1280, 720)
+	gameplay_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	gameplay_viewport.handle_input_locally = false
+	gameplay_viewport_container.add_child(gameplay_viewport)
+
 func build_world() -> void:
+	build_gameplay_viewport()
 	var environment := WorldEnvironment.new()
 	world_environment = Environment.new()
-	world_environment.background_mode = Environment.BG_COLOR
+	world_environment.background_mode = Environment.BG_CANVAS
+	world_environment.background_canvas_max_layer = -1
 	world_environment.background_color = Color("55baf2")
 	world_environment.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
 	world_environment.ambient_light_color = Color.WHITE
@@ -135,64 +163,181 @@ func build_world() -> void:
 	world_environment.adjustment_contrast = 1.08
 	world_environment.adjustment_saturation = 1.14
 	environment.environment = world_environment
-	add_child(environment)
-	load_background_panorama()
+	gameplay_viewport.add_child(environment)
+	build_background_video()
 	load_surface_textures()
 
 	sun_light = DirectionalLight3D.new()
 	sun_light.rotation_degrees = Vector3(-55, -25, 0)
 	sun_light.light_energy = 0.72
 	sun_light.shadow_enabled = true
-	add_child(sun_light)
+	gameplay_viewport.add_child(sun_light)
 
 	camera_rig = Node3D.new()
 	camera_rig.name = "CameraRig"
-	add_child(camera_rig)
+	gameplay_viewport.add_child(camera_rig)
 	camera = Camera3D.new()
 	camera.fov = 78.0
 	camera.current = true
 	camera_rig.add_child(camera)
 	course_root = Node3D.new()
 	course_root.name = "GeneratedCourse"
-	add_child(course_root)
+	gameplay_viewport.add_child(course_root)
 	custom_library_root = Node3D.new()
 	custom_library_root.name = "CustomModelLibrary"
 	custom_library_root.visible = false
-	add_child(custom_library_root)
+	gameplay_viewport.add_child(custom_library_root)
 	companion_root = Node3D.new()
 	companion_root.name = "RunnerCompanion"
-	add_child(companion_root)
+	gameplay_viewport.add_child(companion_root)
 	companion_root.visible = false
 
-func load_background_panorama() -> void:
-	var folder_path := "res://раунды/%s/textures/background" % active_round
-	var image_files: Array[String] = []
-	if not DirAccess.dir_exists_absolute(folder_path):
-		world_environment.background_mode = Environment.BG_COLOR
-		world_environment.sky = null
-		return
-	for file_name in DirAccess.get_files_at(folder_path):
-		if file_name.get_extension().to_lower() in ["png", "jpg", "jpeg", "webp", "hdr", "exr"]:
-			image_files.append(file_name)
-	image_files.sort()
-	if image_files.is_empty():
-		world_environment.background_mode = Environment.BG_COLOR
-		world_environment.sky = null
-		return
-	var texture := load(folder_path.path_join(image_files[0])) as Texture2D
-	if not texture:
-		push_warning("Could not load background panorama: %s" % image_files[0])
-		return
-	var panorama_material := PanoramaSkyMaterial.new()
-	panorama_material.panorama = texture
-	var panorama_sky := Sky.new()
-	panorama_sky.sky_material = panorama_material
-	world_environment.sky = panorama_sky
-	world_environment.background_mode = Environment.BG_SKY
+func build_background_video() -> void:
+	background_video_layer = CanvasLayer.new()
+	background_video_layer.name = "BackgroundVideoLayer"
+	background_video_layer.layer = -100
+	gameplay_viewport.add_child(background_video_layer)
+	for slot in range(2):
+		var player := VideoStreamPlayer.new()
+		player.name = "BackgroundVideo_%d" % (slot + 1)
+		player.set_anchors_and_offsets_preset(Control.PRESET_TOP_LEFT)
+		player.expand = true
+		player.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		player.volume_db = -80.0
+		player.z_index = 1 - slot
+		player.finished.connect(advance_background_video.bind(slot))
+		background_video_layer.add_child(player)
+		background_video_players.append(player)
 
+func load_background_videos() -> void:
+	for slot in range(background_video_players.size()):
+		background_video_prime_tokens[slot] += 1
+		background_video_players[slot].stop()
+		background_video_players[slot].stream = null
+		background_video_players[slot].loop = false
+		background_video_players[slot].visible = false
+		background_video_ready[slot] = false
+		background_video_clip_indices[slot] = -1
+	background_video_paths.clear()
+	background_video_active_slot = 0
+	background_video_index = 0
+	background_video_started = false
+	var folder_path := "res://раунды/%s/video_out_line" % active_round
+	if DirAccess.dir_exists_absolute(folder_path):
+		for file_name in DirAccess.get_files_at(folder_path):
+			if file_name.begins_with("background_") and file_name.get_extension().to_lower() == "ogv":
+				background_video_paths.append(folder_path.path_join(file_name))
+	background_video_paths.sort()
+	if background_video_paths.is_empty():
+		push_warning("В %s нет фоновых видео background_*.ogv" % folder_path)
+		return
+	background_video_players[0].z_index = 1
+	background_video_players[1].z_index = 0
+	if background_video_paths.size() == 1:
+		# A single clip loops inside one decoder. Running the same 4K Theora stream
+		# through both buffers doubles CPU usage and causes severe frame drops.
+		background_video_players[0].loop = true
+		background_video_players[1].visible = false
+		prime_background_video(0, 0)
+		return
+	prime_background_video(0, 0)
+	prime_background_video(1, 1)
+
+func prime_background_video(slot: int, clip_index: int) -> void:
+	if background_video_paths.is_empty() or slot < 0 or slot >= background_video_players.size():
+		return
+	background_video_prime_tokens[slot] += 1
+	var token := background_video_prime_tokens[slot]
+	background_video_ready[slot] = false
+	var normalized_index := posmod(clip_index, background_video_paths.size())
+	var stream := load(background_video_paths[normalized_index]) as VideoStream
+	if not stream:
+		push_warning("Не удалось загрузить фоновое видео: %s" % background_video_paths[normalized_index])
+		return
+	var player := background_video_players[slot]
+	player.stop()
+	player.stream = stream
+	player.visible = true
+	player.paused = false
+	player.play()
+	# Give Theora enough rendering time to decode and display its first frame.
+	await get_tree().process_frame
+	await get_tree().process_frame
+	if token != background_video_prime_tokens[slot]:
+		return
+	player.paused = true
+	background_video_clip_indices[slot] = normalized_index
+	background_video_ready[slot] = true
+
+func start_background_video() -> void:
+	if background_video_started or background_video_paths.is_empty():
+		return
+	background_video_started = true
+	var player := background_video_players[background_video_active_slot]
+	player.paused = false
+	if not player.is_playing():
+		player.play()
+
+func advance_background_video(slot: int) -> void:
+	if slot != background_video_active_slot or not background_video_started or finished:
+		return
+	switch_to_prepared_background()
+
+func switch_to_prepared_background() -> void:
+	var next_slot := 1 - background_video_active_slot
+	while not background_video_ready[next_slot] and background_video_started and not finished:
+		await get_tree().process_frame
+	if not background_video_started or finished:
+		return
+	var old_slot := background_video_active_slot
+	background_video_active_slot = next_slot
+	background_video_index = background_video_clip_indices[next_slot]
+	background_video_players[next_slot].z_index = 1
+	background_video_players[old_slot].z_index = 0
+	background_video_players[next_slot].paused = false
+	if not background_video_players[next_slot].is_playing():
+		background_video_players[next_slot].play()
+	var following_index := (background_video_index + 1) % background_video_paths.size()
+	prime_background_video(old_slot, following_index)
+
+func pause_background_video() -> void:
+	for player in background_video_players:
+		player.paused = true
+
+func update_gameplay_composite_motion() -> void:
+	if not gameplay_viewport_container or not gameplay_viewport:
+		return
+	var viewport_size := get_viewport().get_visible_rect().size
+	var overscan_size := viewport_size * background_video_overscan
+	var jump_ratio := vertical_offset / maxf(jump_height, 0.001)
+	var vertical_shift := jump_ratio * background_jump_shift_px
+	gameplay_viewport_container.position = (viewport_size - overscan_size) * 0.5 + Vector2(0.0, vertical_shift)
+	gameplay_viewport_container.size = overscan_size
+	for player in background_video_players:
+		player.position = Vector2.ZERO
+		player.size = overscan_size
+
+func reset_background_video() -> void:
+	background_video_started = false
+	background_video_active_slot = 0
+	background_video_index = 0
+	if background_video_players.is_empty():
+		return
+	for slot in range(background_video_players.size()):
+		background_video_prime_tokens[slot] += 1
+		background_video_players[slot].stop()
+		background_video_players[slot].loop = background_video_paths.size() == 1 and slot == 0
+		background_video_players[slot].visible = not background_video_paths.is_empty() and (background_video_paths.size() > 1 or slot == 0)
+		background_video_players[slot].z_index = 1 - slot
+		background_video_ready[slot] = false
+	if background_video_paths.size() == 1:
+		prime_background_video(0, 0)
+	elif background_video_paths.size() > 1:
+		prime_background_video(0, 0)
+		prime_background_video(1, 1)
 func load_surface_textures() -> void:
 	surface_textures.clear()
-	for slot in ["road", "ground"]:
+	for slot in ["road"]:
 		var folder_path := "res://раунды/%s/textures/%s" % [active_round, slot]
 		var image_files: Array[String] = []
 		if not DirAccess.dir_exists_absolute(folder_path):
@@ -212,21 +357,12 @@ func build_course() -> void:
 		child.queue_free()
 	image_panel_events.clear()
 	obstacle_model_next_indices.clear()
-	var road_color := Color("596b45") if imported_world_enabled() else theme_color("road")
-	var end_reference_round := active_round == "round_02"
-	var road_width := 10.4 if imported_world_enabled() else (15.0 if end_reference_round else 11.0)
-	var road_thickness := 0.12 if imported_world_enabled() else 0.25
+	var road_color := theme_color("road")
+	var road_width := 11.0
+	var road_thickness := 0.25
 	create_box("Road", Vector3(road_width, road_thickness, course_length + 20), Vector3(0, -road_thickness, -course_length * 0.5 + 5), road_color)
-	if imported_world_enabled():
-		# Subtle inset strips read as a route without turning the road into a bright
-		# unrelated sheet that visually hides the imported location.
-		for lane_mark in [-1.6, 1.6]:
-			create_box("WorldRouteMark", Vector3(0.055, 0.018, course_length), Vector3(lane_mark, 0.015, -course_length * 0.5 + 5), Color("9aaa72"))
-	elif not end_reference_round:
-		for lane_mark in [-1.6, 1.6]:
-			create_box("LaneMark", Vector3(0.10, 0.025, course_length), Vector3(lane_mark, 0.02, -course_length * 0.5 + 5), Color(1, 1, 1, 0.65))
-
-	build_theme_environment()
+	for lane_mark in [-1.6, 1.6]:
+		create_box("LaneMark", Vector3(0.10, 0.025, course_length), Vector3(lane_mark, 0.02, -course_length * 0.5 + 5), Color(1, 1, 1, 0.65))
 
 	var colors := [Color("49d765"), Color("3a84ed"), Color("ffca38"), Color("9858e8")]
 	for index in range(events.size()):
@@ -251,11 +387,10 @@ func build_course() -> void:
 
 	create_random_image_panels()
 
-	if not end_reference_round:
-		var finish_z := start_position.z - course_length
-		create_box("FinishTop", Vector3(11, 0.55, 0.55), Vector3(0, 5.7, finish_z), Color.WHITE)
-		create_box("FinishLeft", Vector3(0.55, 6, 0.55), Vector3(-5.2, 2.8, finish_z), Color.WHITE)
-		create_box("FinishRight", Vector3(0.55, 6, 0.55), Vector3(5.2, 2.8, finish_z), Color.WHITE)
+	var finish_z := start_position.z - course_length
+	create_box("FinishTop", Vector3(11, 0.55, 0.55), Vector3(0, 5.7, finish_z), Color.WHITE)
+	create_box("FinishLeft", Vector3(0.55, 6, 0.55), Vector3(-5.2, 2.8, finish_z), Color.WHITE)
+	create_box("FinishRight", Vector3(0.55, 6, 0.55), Vector3(5.2, 2.8, finish_z), Color.WHITE)
 
 func create_random_image_panels() -> void:
 	if round_is_self_contained():
@@ -329,15 +464,28 @@ func build_theme_environment() -> void:
 		spawn_round_landscape_objects()
 		spawn_round_hero_objects()
 		return
+	var has_round_owned_environment := has_round_environment_models()
 	build_custom_base_environment()
-	build_category_placeholders()
+	if not has_round_owned_environment:
+		build_category_placeholders()
 	spawn_custom_environment_objects()
 	spawn_round_environment_objects()
+	if has_round_owned_environment:
+		return
 	if active_layout == "Closed Corridor":
 		build_closed_layout_shell()
 		build_closed_world_layers()
 	else:
 		build_open_world_layers()
+
+func has_round_environment_models() -> bool:
+	for folder_path in round_category_folders().values():
+		if not DirAccess.dir_exists_absolute(str(folder_path)):
+			continue
+		for file_name in DirAccess.get_files_at(str(folder_path)):
+			if file_name.get_extension().to_lower() in ["glb", "gltf"]:
+				return true
+	return false
 
 func round_is_self_contained() -> bool:
 	var config := ConfigFile.new()
@@ -806,6 +954,8 @@ func spawn_model_instance(model_index: int, position: Vector3, target_height: fl
 	position.y = 0.0
 	instance.position = position
 	course_root.add_child(instance)
+	if custom_model_categories[model_index] != "FENCES":
+		face_instance_to_track(instance)
 	# Imported GLB roots often have an offset pivot or helper nodes below the
 	# visible object. Measure the final visible meshes in world space and move
 	# the instance until their actual lowest point touches the ground.
@@ -815,6 +965,12 @@ func spawn_model_instance(model_index: int, position: Vector3, target_height: fl
 	# pivots or wide foundations which otherwise poke through into the road.
 	if custom_model_categories[model_index] != "FENCES" and absf(position.x) > 5.5:
 		move_instance_behind_fence(instance, signf(position.x))
+
+func face_instance_to_track(instance: Node3D) -> void:
+	var target := Vector3(0.0, instance.global_position.y, instance.global_position.z)
+	if instance.global_position.distance_to(target) < 0.01:
+		return
+	instance.look_at(target, Vector3.UP)
 
 func move_instance_behind_fence(instance: Node3D, side: float) -> void:
 	var bounds := calculate_world_mesh_bounds(instance)
@@ -856,20 +1012,38 @@ func open_model_file_dialog() -> void:
 	model_file_dialog.popup_centered_ratio(0.78)
 
 func load_models_from_category_folders() -> void:
-	var folders := {
-		"CHARACTERS": "res://модели/characters_animals",
-		"BUILDINGS": "res://модели/buildings",
-		"DECOR": "res://модели/decor",
-		"FENCES": "res://модели/fences",
-		"LANDMARK": "res://модели/landmark",
-	}
+	clear_custom_model_library()
+	var folders := round_category_folders()
 	for category in folders:
 		var folder_path: String = folders[category]
+		if not DirAccess.dir_exists_absolute(folder_path):
+			continue
 		for file_name in DirAccess.get_files_at(folder_path):
 			if file_name.get_extension().to_lower() not in ["glb", "gltf"]:
 				continue
 			var resource_path := folder_path.path_join(file_name)
 			load_external_model(ProjectSettings.globalize_path(resource_path), category)
+
+func round_category_folders() -> Dictionary:
+	var round_root := "res://раунды/%s" % active_round
+	return {
+		"BUILDINGS": round_root.path_join("buildings"),
+		"DECOR": round_root.path_join("decor"),
+		"FENCES": round_root.path_join("fences"),
+	}
+
+func clear_custom_model_library() -> void:
+	for prototype in custom_model_prototypes:
+		if is_instance_valid(prototype):
+			prototype.queue_free()
+	custom_model_prototypes.clear()
+	custom_model_names.clear()
+	custom_model_scales.clear()
+	custom_model_categories.clear()
+	custom_model_paths.clear()
+	custom_animation_paths.clear()
+	if custom_model_list:
+		custom_model_list.clear()
 
 func load_obstacle_models() -> void:
 	for prototypes in obstacle_model_prototypes.values():
@@ -1200,11 +1374,17 @@ func update_companion(delta: float) -> void:
 	companion_visual.rotation.z = sin(companion_run_time * 5.5) * 0.035 * run_amount
 
 func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_TAB and not builder_active:
+		settings_panel.visible = not settings_panel.visible
+		get_viewport().set_input_as_handled()
+		return
 	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_ESCAPE:
 		if not builder_active:
 			DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
 			builder_active = true
 			builder_overlay.visible = true
+			settings_panel.visible = false
+			pause_background_video()
 			get_viewport().set_input_as_handled()
 
 func create_dodge_gate(z: float, action: String, color: Color) -> void:
@@ -1408,7 +1588,7 @@ func build_ui() -> void:
 
 	settings_panel = PanelContainer.new()
 	settings_panel.position = Vector2(28, 110)
-	settings_panel.size = Vector2(310, 300)
+	settings_panel.size = Vector2(340, 510)
 	settings_panel.visible = false
 	layer.add_child(settings_panel)
 	var settings := VBoxContainer.new()
@@ -1421,6 +1601,13 @@ func build_ui() -> void:
 	add_setting(settings, "Speed", 6, 24, speed, func(value): speed = value)
 	add_setting(settings, "Jump Height", 1, 4, jump_height, func(value): jump_height = value)
 	add_setting(settings, "Lane Smoothness", 3, 16, lane_smoothness, func(value): lane_smoothness = value)
+	add_setting(settings, "Gameplay Jump Move (px)", 0, 180, background_jump_shift_px, func(value):
+		background_jump_shift_px = value
+		update_gameplay_composite_motion())
+
+	add_setting(settings, "Gameplay Overscan", 1.1, 1.6, background_video_overscan, func(value):
+		background_video_overscan = value
+		update_gameplay_composite_motion())
 	var button := Button.new()
 	button.text = "RESTART COURSE"
 	button.pressed.connect(restart)
@@ -1431,14 +1618,16 @@ func build_ui() -> void:
 
 func add_setting(parent: VBoxContainer, label_text: String, minimum: float, maximum: float, initial: float, callback: Callable) -> void:
 	var label := Label.new()
-	label.text = label_text
+	label.text = "%s: %.1f" % [label_text, initial]
 	parent.add_child(label)
 	var slider := HSlider.new()
 	slider.min_value = minimum
 	slider.max_value = maximum
 	slider.step = 0.1
 	slider.value = initial
-	slider.value_changed.connect(callback)
+	slider.value_changed.connect(func(value: float):
+		label.text = "%s: %.1f" % [label_text, value]
+		callback.call(value))
 	parent.add_child(slider)
 
 func build_builder_ui() -> void:
@@ -1975,10 +2164,11 @@ func apply_builder_settings() -> void:
 	companion_size = companion_scale_spin.value
 	if round_option and round_option.item_count > 0:
 		active_round = str(round_option.get_item_metadata(round_option.selected))
+	load_models_from_category_folders()
 	load_obstacle_models()
 	refresh_round_model_list()
 	load_surface_textures()
-	load_background_panorama()
+	load_background_videos()
 	active_theme = theme_option.get_item_text(theme_option.selected)
 	active_layout = layout_option.get_item_text(layout_option.selected)
 	apply_theme_environment()
@@ -2101,6 +2291,7 @@ func _process(delta: float) -> void:
 		action_label.text = str(maxi(1, ceili(countdown)))
 		if countdown <= 0.0:
 			action_label.text = "GO!"
+			start_background_video()
 	elif not finished:
 		distance += speed * delta
 		evaluate_event()
@@ -2109,6 +2300,7 @@ func _process(delta: float) -> void:
 			finished = true
 			action_label.text = "FINISH!"
 			action_icon.visible = false
+			pause_background_video()
 
 	if jumping:
 		jump_time += delta
@@ -2139,8 +2331,11 @@ func _process(delta: float) -> void:
 			dodge_time = 0.0
 			target_x = 0.0
 	camera_rig.position.x = lerpf(camera_rig.position.x, target_x, 1.0 - exp(-lane_smoothness * delta))
-	camera_rig.position.y = start_position.y + vertical_offset - duck_offset + sin(distance * 1.3) * 0.035
+	# JUMP moves the completed gameplay image. DUCK keeps its original behavior
+	# and lowers the 3D camera while the background remains fixed.
+	camera_rig.position.y = start_position.y - duck_offset + sin(distance * 1.3) * 0.035
 	camera_rig.position.z = start_position.z - distance
+	update_gameplay_composite_motion()
 	progress_bar.value = distance
 	distance_label.text = "%d / %d M" % [int(distance), int(course_length)]
 	if not finished and countdown <= 0.0:
@@ -2433,6 +2628,7 @@ func restart() -> void:
 	action_armed = false
 	feedback_time = 0.0
 	countdown = 3.0
+	reset_background_video()
 	smash_sequence_active = false
 	smash_sequence_timer = 0.0
 	smash_sequence_stage = 0
@@ -2442,6 +2638,7 @@ func restart() -> void:
 	if action_icon:
 		action_icon.scale = Vector2.ONE
 	camera_rig.position = start_position
+	update_gameplay_composite_motion()
 	if companion_root:
 		companion_root.position = Vector3(start_position.x + 2.35, 0.0, start_position.z - 5.2)
 		companion_run_time = 0.0
